@@ -1,8 +1,9 @@
 {
   "name": "Rust-Lean-LLM Dev",
   "build": {
+    "context": "..",
     "dockerfile": "Dockerfile",
-    "target": "dev" 
+    "target": "dev"
   },
   "customizations": {
     "vscode": {

@@ -11,31 +11,34 @@ RUN apt-get update && apt-get install -y \
 
 FROM base AS dependencies
 
-# Build dependencies
 RUN apt-get update && apt-get install -y \
     curl git build-essential pkg-config libssl-dev \
     opam m4 unzip bubblewrap libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust
+# Rust (needed for make setup-charon)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Install Charon (Aeneas dependency)
 WORKDIR /opt
-RUN git clone https://github.com/AeneasVerif/charon && \
-    cd charon && \
-    cargo build --release
-ENV PATH="/opt/charon/target/release:${PATH}"
 
-# Install Aeneas
-RUN opam init -y --disable-sandboxing --compiler=4.14.1 && \
-    opam install -y dune menhir ppx_deriving visitors easy_format zarith && \
-    git clone https://github.com/AeneasVerif/aeneas && \
-    cd aeneas && \
-    eval $(opam env) && \
-    make
-ENV PATH="/opt/aeneas/bin:${PATH}"
+# Opam + OCaml deps, then Aeneas + pinned Charon
+ENV OPAMYES=1 OPAMNONINTERACTIVE=1
+
+RUN opam init -y --disable-sandboxing \
+ && opam switch create 5.3.0 -y \
+ && eval "$(opam env --switch=5.3.0)" \
+ && opam install -y \
+      dune ppx_deriving visitors easy_logging zarith yojson core_unix odoc \
+      unionFind ocamlgraph menhir ocamlformat progress domainslib \
+ && git clone https://github.com/AeneasVerif/aeneas \
+ && cd aeneas \
+ && eval "$(opam env --switch=5.3.0)" \
+ && make setup-charon \
+ && make
+
+# Convenience PATHs (Aeneas bin is in ./bin; Charon make outputs bin/charon)
+ENV PATH="/opt/aeneas/bin:/opt/aeneas/charon/bin:${PATH}"
 
 FROM dependencies AS dev
 
@@ -66,6 +69,3 @@ ENV PATH="/root/.elan/bin:${PATH}"
 COPY --from=dependencies /opt/aeneas/bin/aeneas /usr/local/bin/aeneas
 COPY --from=dependencies /opt/charon/target/release/charon /usr/local/bin/charon
 COPY --from=dependencies /opt/charon/target/release/charon-driver /usr/local/bin/charon-driver
-
-# COPY --from=builder /app/target/release/my-app /usr/local/bin/my-app
-# CMD ["my-app"]
