@@ -1,0 +1,16 @@
+{
+  "name": "Rust-Lean-LLM Dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "target": "dev" 
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "leanprover.lean4",
+        "ms-python.python"
+      ]
+    }
+  }
+}
