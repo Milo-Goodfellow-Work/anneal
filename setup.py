@@ -12,7 +12,6 @@ def rust_lean(src):
 
     # Create Lake Lean project
     lean_dir = os.path.join(os.path.dirname(os.path.abspath(src)), 'spec')
-    subprocess.run(['lake', 'new', 'spec', 'math'], cwd=os.path.dirname(lean_dir), check=True)
 
     # Generate llbc file
     subprocess.run(['charon', 'cargo', '--preset=aeneas'], cwd=src, check=True)
@@ -26,6 +25,6 @@ def rust_lean(src):
     # Get generated Lean
     return open(f'{lean_dir}/{lean_name}.lean', 'r').read()
 
-src = os.path.expanduser(sys.argv[1])
-#gend_file = open('Generated.lean', 'w+')
-print(rust_lean(src))
+# src = os.path.expanduser(sys.argv[1])
+# gend_file = open('Generated.lean', 'w+')
+print(rust_lean("./TestProject"))

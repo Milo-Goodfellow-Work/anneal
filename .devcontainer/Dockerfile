@@ -47,6 +47,53 @@ ENV PATH="/root/.elan/bin:${PATH}"
 
 RUN pip install --no-cache-dir black flake8 mypy
 
+# Ensure Aeneas Lean backend is available at runtime for local Lake dependency
+# (jobs/spec project will require aeneas from "/opt/aeneas/backends/lean")
+RUN test -d /opt/aeneas/backends/lean
+
+# Create a single spec project under /app (no mathlib).
+# This runs in postCreateCommand so it happens inside the real container filesystem.
+RUN cat > /usr/local/bin/init-spec.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${1:-/app}"
+SPEC="${ROOT}/spec"
+
+mkdir -p "${ROOT}"
+
+if [ -d "${SPEC}" ]; then
+  echo "spec already exists at ${SPEC}"
+  exit 0
+fi
+
+echo "Creating spec Lake project at ${SPEC}"
+lake new "${SPEC}"
+
+# Aeneas recommends using its Lean backend's lean-toolchain for compatibility.
+cp /opt/aeneas/backends/lean/lean-toolchain "${SPEC}/lean-toolchain"
+
+# Minimal lakefile: depend on Aeneas Lean backend, no mathlib.
+cat > "${SPEC}/lakefile.toml" <<'TOML'
+name = "spec"
+version = "0.1.0"
+defaultTargets = ["Spec"]
+
+[[lean_lib]]
+name = "Spec"
+
+[[require]]
+name = "aeneas"
+path = "/opt/aeneas/backends/lean"
+TOML
+
+echo "Done. (No lake update/build performed.)"
+EOF
+RUN chmod +x /usr/local/bin/init-spec.sh
+
+# Optional convenience: make /app the default working directory in dev
+WORKDIR /app
+
 FROM dev AS builder
 WORKDIR /app
 COPY . .
@@ -67,5 +114,8 @@ ENV PATH="/root/.elan/bin:${PATH}"
 
 # Copy Aeneas and Charon
 COPY --from=dependencies /opt/aeneas/bin/aeneas /usr/local/bin/aeneas
-COPY --from=dependencies /opt/charon/target/release/charon /usr/local/bin/charon
-COPY --from=dependencies /opt/charon/target/release/charon-driver /usr/local/bin/charon-driver
+COPY --from=dependencies /opt/aeneas/charon/bin/charon /usr/local/bin/charon
+COPY --from=dependencies /opt/aeneas/charon/bin/charon-driver /usr/local/bin/charon-driver
+
+# Copy the Aeneas Lean backend so /opt/aeneas/backends/lean exists in prod too
+COPY --from=dependencies /opt/aeneas/backends/lean /opt/aeneas/backends/lean
