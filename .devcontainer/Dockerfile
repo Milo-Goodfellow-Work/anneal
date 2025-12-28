@@ -47,51 +47,72 @@ ENV PATH="/root/.elan/bin:${PATH}"
 
 RUN pip install --no-cache-dir black flake8 mypy
 
-# Ensure Aeneas Lean backend is available at runtime for local Lake dependency
-# (jobs/spec project will require aeneas from "/opt/aeneas/backends/lean")
-RUN test -d /opt/aeneas/backends/lean
+# In devcontainers, VS Code often forces the repo to /workspaces/<repo>.
+# This script makes /app point at that repo so paths match prod (/app/...) for tooling.
+RUN printf '%s\n' \
+'#!/bin/sh' \
+'set -eu' \
+'' \
+'WS="/workspaces/anneal"' \
+'' \
+'if [ -d "$WS" ]; then' \
+'  if [ -L /app ]; then' \
+'    echo "/app is already a symlink; leaving it."' \
+'    exit 0' \
+'  fi' \
+'  echo "Linking /app -> $WS (devcontainer workspace)..."' \
+'  rm -rf /app' \
+'  ln -s "$WS" /app' \
+'  exit 0' \
+'fi' \
+'' \
+'echo "No $WS found; leaving /app as a normal directory (prod-style)."' \
+> /usr/local/bin/link-workspace.sh \
+ && chmod +x /usr/local/bin/link-workspace.sh
 
-# Create a single spec project under /app (no mathlib).
-# This runs in postCreateCommand so it happens inside the real container filesystem.
-RUN cat > /usr/local/bin/init-spec.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+# Create a single spec project under /app/spec (no mathlib).
+# Uses Aeneas's Lean backend lean-toolchain for compatibility.
+RUN printf '%s\n' \
+'#!/bin/sh' \
+'set -eu' \
+'' \
+'ROOT="${1:-/app}"' \
+'PKG="spec"' \
+'SPEC="${ROOT}/${PKG}"' \
+'' \
+'mkdir -p "${ROOT}"' \
+'' \
+'if [ -d "${SPEC}" ]; then' \
+'  echo "spec already exists at ${SPEC}"' \
+'  exit 0' \
+'fi' \
+'' \
+'echo "Creating spec Lake project at ${SPEC}"' \
+'cd "${ROOT}"' \
+'lake new "${PKG}"' \
+'' \
+'# Aeneas recommends using its Lean backend''s lean-toolchain for compatibility.' \
+'cp /opt/aeneas/backends/lean/lean-toolchain "${SPEC}/lean-toolchain"' \
+'' \
+'# Minimal lakefile: depend on Aeneas Lean backend, no mathlib.' \
+'cat > "${SPEC}/lakefile.toml" <<'\''TOML'\''' \
+'name = "spec"' \
+'version = "0.1.0"' \
+'defaultTargets = ["Spec"]' \
+'' \
+'[[lean_lib]]' \
+'name = "Spec"' \
+'' \
+'[[require]]' \
+'name = "aeneas"' \
+'path = "/opt/aeneas/backends/lean"' \
+'TOML' \
+'' \
+'echo "Done. (No lake update/build performed.)"' \
+> /usr/local/bin/init-spec.sh \
+ && chmod +x /usr/local/bin/init-spec.sh
 
-ROOT="${1:-/app}"
-SPEC="${ROOT}/spec"
-
-mkdir -p "${ROOT}"
-
-if [ -d "${SPEC}" ]; then
-  echo "spec already exists at ${SPEC}"
-  exit 0
-fi
-
-echo "Creating spec Lake project at ${SPEC}"
-lake new "${SPEC}"
-
-# Aeneas recommends using its Lean backend's lean-toolchain for compatibility.
-cp /opt/aeneas/backends/lean/lean-toolchain "${SPEC}/lean-toolchain"
-
-# Minimal lakefile: depend on Aeneas Lean backend, no mathlib.
-cat > "${SPEC}/lakefile.toml" <<'TOML'
-name = "spec"
-version = "0.1.0"
-defaultTargets = ["Spec"]
-
-[[lean_lib]]
-name = "Spec"
-
-[[require]]
-name = "aeneas"
-path = "/opt/aeneas/backends/lean"
-TOML
-
-echo "Done. (No lake update/build performed.)"
-EOF
-RUN chmod +x /usr/local/bin/init-spec.sh
-
-# Optional convenience: make /app the default working directory in dev
+# Optional convenience: default working directory
 WORKDIR /app
 
 FROM dev AS builder
@@ -119,3 +140,7 @@ COPY --from=dependencies /opt/aeneas/charon/bin/charon-driver /usr/local/bin/cha
 
 # Copy the Aeneas Lean backend so /opt/aeneas/backends/lean exists in prod too
 COPY --from=dependencies /opt/aeneas/backends/lean /opt/aeneas/backends/lean
+
+# Copy the spec init script into prod so your queue worker can call it too.
+COPY --from=dev /usr/local/bin/init-spec.sh /usr/local/bin/init-spec.sh
+RUN chmod +x /usr/local/bin/init-spec.sh

@@ -5,16 +5,14 @@
     "dockerfile": "Dockerfile",
     "target": "dev"
   },
-  "workspaceFolder": "/app",
   "customizations": {
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
         "leanprover.lean4",
-        "ms-python.python",
-        "Google.gemini-code-assist"
+        "ms-python.python"
       ]
     }
   },
-  "postCreateCommand": "/usr/local/bin/init-spec.sh /app"
+  "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app"
 }

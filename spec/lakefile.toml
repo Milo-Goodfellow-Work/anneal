@@ -1,0 +1,10 @@
+name = "spec"
+version = "0.1.0"
+defaultTargets = ["Spec"]
+
+[[lean_lib]]
+name = "Spec"
+
+[[require]]
+name = "aeneas"
+path = "/opt/aeneas/backends/lean"
