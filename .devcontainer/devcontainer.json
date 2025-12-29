@@ -5,6 +5,7 @@
     "dockerfile": "Dockerfile",
     "target": "dev"
   },
+  "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -13,6 +14,5 @@
         "ms-python.python"
       ]
     }
-  },
-  "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app"
+  }
 }
