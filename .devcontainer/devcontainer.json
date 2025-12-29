@@ -5,12 +5,9 @@
     "dockerfile": "Dockerfile"
   },
 
-  // Make the *workspace* live at /app (so your prod paths match).
-  "workspaceFolder": "/app",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
+  "workspaceFolder": "/workspaces/anneal",
 
-  // Fix CRLF if present, then run your init against /app (now valid).
-  "postCreateCommand": "sed -i 's/\\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh && /usr/local/bin/init-spec.sh /app",
+  "postCreateCommand": "sed -i 's/\\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh && rm -rf /app && ln -s /workspaces/anneal /app && /usr/local/bin/init-spec.sh /app",
 
   "customizations": {
     "vscode": {

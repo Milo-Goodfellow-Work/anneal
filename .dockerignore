@@ -1,0 +1,11 @@
+**/.git
+**/.lake
+**/target
+**/__pycache__
+**/*.olean
+**/*.ilean
+**/*.cmi
+**/*.cmx
+**/*.o
+**/*.a
+**/*.so
