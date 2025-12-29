@@ -1,4 +1,3 @@
-# .devcontainer/Dockerfile
 FROM python:3.11-bookworm AS base
 
 SHELL ["/bin/bash", "-lc"]
@@ -19,8 +18,7 @@ FROM base AS dependencies
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git build-essential pkg-config libssl-dev \
-    opam m4 unzip rsync \
-    libgmp-dev \
+    opam m4 unzip bubblewrap libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust (needed for make setup-charon)
@@ -47,46 +45,13 @@ RUN opam init -y --disable-sandboxing \
 # Convenience PATHs (Aeneas bin is in ./bin; Charon make outputs bin/charon)
 ENV PATH="/opt/aeneas/bin:/opt/aeneas/charon/bin:${PATH}"
 
-# ---- DEV STAGE (this name must exist for devcontainers build.target = "dev") ----
-FROM base AS dev
+FROM dependencies AS dev
 
-# Runtime deps for tools + building/running your worker
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    curl \
-    git \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    libgmp10 \
-    ca-certificates \
-    xz-utils \
-    zstd \
-    && rm -rf /var/lib/apt/lists/*
-
-# Rust (for your worker / running charon cargo)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Lean (elan includes lake)
 RUN curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
   | sh -s -- -y --default-toolchain leanprover/lean4:stable
 ENV PATH="/root/.elan/bin:${PATH}"
 
-# Copy the built Aeneas tree (we need backends/lean too) and binaries
-COPY --from=dependencies /opt/aeneas /opt/aeneas
-ENV PATH="/opt/aeneas/bin:/opt/aeneas/charon/bin:${PATH}"
-
-WORKDIR /opt
-
-# Symlink /app -> /workspaces/anneal so dev feels like prod paths.
-RUN cat >/usr/local/bin/link-workspace.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-rm -rf /app
-ln -s /workspaces/anneal /app
-EOF
-RUN chmod +x /usr/local/bin/link-workspace.sh
+RUN pip install --no-cache-dir black flake8 mypy
 
 # Create/refresh the spec Lake project in /app/spec and delete template junk.
 RUN cat >/usr/local/bin/init-spec.sh <<'EOF'
@@ -101,7 +66,7 @@ if [ ! -d "spec" ]; then
   lake new spec
 fi
 
-# Overwrite Lean toolchain with the one Aeneas expects for its Lean backend
+# Overwrite Lean toolchain with the one Aeneas expects
 cp /opt/aeneas/backends/lean/lean-toolchain "$APP_DIR/spec/lean-toolchain"
 
 # Minimal lakefile: library only; no Main executable; depend on Aeneas via path
@@ -118,7 +83,7 @@ path = "/opt/aeneas/backends/lean"
 name = "Spec"
 TOML
 
-# Root module: setup.py will append `import Spec.<CrateModule>`
+# Root module (setup.py appends imports here)
 cat >"$APP_DIR/spec/Spec.lean" <<'LEAN'
 -- Root module for the Spec library.
 LEAN
@@ -131,5 +96,35 @@ rm -f "$APP_DIR/spec/Spec/Basic.lean" || true
 EOF
 RUN chmod +x /usr/local/bin/init-spec.sh
 
+FROM dev AS builder
 WORKDIR /app
-CMD ["bash"]
+COPY . .
+
+RUN cargo build --release
+
+FROM base AS prod
+WORKDIR /app
+
+# Install runtime dependencies for verification tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    xz-utils zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust and Lean
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf \
+  | sh -s -- -y --default-toolchain leanprover/lean4:stable
+ENV PATH="/root/.elan/bin:${PATH}"
+
+# Copy Aeneas + Charon from dependencies (Charon is in /opt/aeneas/charon/bin)
+COPY --from=dependencies /opt/aeneas /opt/aeneas
+ENV PATH="/opt/aeneas/bin:/opt/aeneas/charon/bin:${PATH}"
+
+# Include the same init script in prod so you can create/reset spec without VS Code
+COPY --from=dev /usr/local/bin/init-spec.sh /usr/local/bin/init-spec.sh
+RUN chmod +x /usr/local/bin/init-spec.sh
+
+# Your app code (so /app/spec can exist in prod too if you run init-spec.sh)
+COPY . /app
