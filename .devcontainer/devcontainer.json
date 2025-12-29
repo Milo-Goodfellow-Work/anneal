@@ -2,7 +2,7 @@
   "name": "Rust-Lean-LLM Dev",
   "build": {
     "context": "..",
-    "dockerfile": ".devcontainer/Dockerfile",
+    "dockerfile": "Dockerfile",
     "target": "dev"
   },
   "postCreateCommand": "/usr/local/bin/init-spec.sh /app",
