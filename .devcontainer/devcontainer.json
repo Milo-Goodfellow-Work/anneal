@@ -2,11 +2,9 @@
   "name": "Rust-Lean-LLM Dev",
   "build": {
     "context": "..",
-    "dockerfile": "../Dockerfile",
+    "dockerfile": ".devcontainer/Dockerfile",
     "target": "dev"
   },
-  "workspaceFolder": "/app",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
   "postCreateCommand": "/usr/local/bin/init-spec.sh /app",
   "customizations": {
     "vscode": {
