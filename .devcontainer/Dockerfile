@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir black flake8 mypy
 # OPAM init (keep it early for caching)
 ENV OPAMROOT=/root/.opam
 RUN opam init -y --disable-sandboxing --bare --no-setup
-RUN opam switch create aeneas ocaml-system
+RUN opam switch create aeneas 4.14.1
 RUN opam exec --switch=aeneas -- opam install -y \
     dune \
     ppx_deriving \
