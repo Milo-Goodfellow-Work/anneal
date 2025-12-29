@@ -2,12 +2,14 @@
   "name": "Rust-Lean-LLM Dev",
   "build": {
     "context": "..",
-    "dockerfile": "Dockerfile",
-    "target": "dev"
+    "dockerfile": "Dockerfile"
   },
 
-  // Fix CRLF in init-spec.sh before running it, then run it.
-  // This avoids the '/usr/bin/env: bash\r' failure even if the file got committed with CRLF once.
+  // Make the *workspace* live at /app (so your prod paths match).
+  "workspaceFolder": "/app",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
+
+  // Fix CRLF if present, then run your init against /app (now valid).
   "postCreateCommand": "sed -i 's/\\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh && /usr/local/bin/init-spec.sh /app",
 
   "customizations": {
