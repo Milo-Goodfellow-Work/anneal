@@ -5,7 +5,11 @@
     "dockerfile": "Dockerfile",
     "target": "dev"
   },
-  "postCreateCommand": "/usr/local/bin/init-spec.sh /app",
+
+  // Fix CRLF in init-spec.sh before running it, then run it.
+  // This avoids the '/usr/bin/env: bash\r' failure even if the file got committed with CRLF once.
+  "postCreateCommand": "sed -i 's/\\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh && /usr/local/bin/init-spec.sh /app",
+
   "customizations": {
     "vscode": {
       "extensions": [
