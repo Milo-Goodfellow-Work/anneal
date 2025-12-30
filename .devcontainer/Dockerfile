@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1.6
-
 FROM python:3.11-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV OPAMROOT=/root/.opam
+ENV OPAMYES=1
+ENV OPAMNONINTERACTIVE=1
 
 # System deps (bash is important because our scripts use /usr/bin/env bash)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libgmp-dev \
-    ocaml \
     opam \
     m4 \
     unzip \
@@ -35,10 +36,10 @@ ENV PATH=/root/.elan/bin:${PATH}
 RUN pip install --no-cache-dir black flake8 mypy
 
 # ---------- Aeneas + Charon ----------
-# OPAM init (keep it early for caching)
-ENV OPAMROOT=/root/.opam
 RUN opam init -y --disable-sandboxing --bare --no-setup
-RUN opam switch create aeneas 5.3.0
+RUN opam switch create aeneas ocaml-base-compiler.5.3.0
+
+# Install OCaml deps you were already using
 RUN opam exec --switch=aeneas -- opam install -y \
     dune \
     ppx_deriving \
@@ -49,43 +50,32 @@ RUN opam exec --switch=aeneas -- opam install -y \
     core_unix \
     odoc
 
-# Build Charon (Rust binary) and keep repo around (for charon-ml too)
-RUN git clone --depth 1 https://github.com/AeneasVerif/charon /opt/charon \
-  && cd /opt/charon \
-  && rustup component add rustfmt \
-  && make build-charon-rust \
-  && ln -sf /opt/charon/bin/charon /usr/local/bin/charon
-
-# Build Aeneas (OCaml toolchain)
+# Clone + build Aeneas, and have it fetch/build the pinned Charon
 RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
-  && cd /opt/aeneas/compiler \
-  && ln -sf /opt/charon/charon-ml charon \
   && cd /opt/aeneas \
-  && opam exec --switch=aeneas -- make
-
-# Provide an `aeneas` command on PATH (Aeneas README runs via dune exec)
-RUN cat >/usr/local/bin/aeneas <<'EOF' \
-#!/usr/bin/env bash
-set -euo pipefail
-cd /opt/aeneas
-exec opam exec --switch=aeneas -- dune exec -- src/main.exe -- "$@"
-EOF
-RUN sed -i 's/\r$//' /usr/local/bin/aeneas && chmod +x /usr/local/bin/aeneas
+  && opam exec --switch=aeneas -- make setup-charon \
+  && cd /opt/aeneas/charon/charon \
+  && TOOLCHAIN="$(awk -F\" '/channel =/ {print $2}' rust-toolchain.toml)" \
+  && rustup toolchain install "$TOOLCHAIN" \
+  && rustup component add rustfmt --toolchain "$TOOLCHAIN" \
+  && cd /opt/aeneas \
+  && opam exec --switch=aeneas -- make \
+  && ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas \
+  && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
 
 # ---------- Devcontainer helper scripts ----------
-RUN cat >/usr/local/bin/link-workspace.sh <<'EOF' \
+RUN cat >/usr/local/bin/link-workspace.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 # postCreateCommand runs with CWD = the workspace folder.
 WS="$(pwd)"
-mkdir -p /app
 rm -rf /app
 ln -snf "$WS" /app
 echo "Linked /app -> $WS"
 EOF
 RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh && chmod +x /usr/local/bin/link-workspace.sh
 
-RUN cat >/usr/local/bin/init-spec.sh <<'EOF' \
+RUN cat >/usr/local/bin/init-spec.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="${1:-/app}"
@@ -96,7 +86,6 @@ if [ ! -d "$ROOT/spec" ]; then
 fi
 
 cd "$ROOT/spec"
-# This will auto-download the Lean toolchain specified by lean-toolchain if needed.
 lake build
 EOF
 RUN sed -i 's/\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh
