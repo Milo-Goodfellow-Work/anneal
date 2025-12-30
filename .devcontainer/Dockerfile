@@ -52,6 +52,7 @@ RUN opam exec --switch=aeneas -- opam install -y \
 # Build Charon (Rust binary) and keep repo around (for charon-ml too)
 RUN git clone --depth 1 https://github.com/AeneasVerif/charon /opt/charon \
   && cd /opt/charon \
+  && rustup component add rustfmt \
   && make build-charon-rust \
   && ln -sf /opt/charon/bin/charon /usr/local/bin/charon
 
