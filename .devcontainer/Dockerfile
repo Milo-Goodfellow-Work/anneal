@@ -48,14 +48,16 @@ RUN opam exec --switch=aeneas -- opam install -y \
     zarith \
     yojson \
     core_unix \
-    odoc
+    odoc \
+    unionfind \
+    menhir
 
 # Clone + build Aeneas, and have it fetch/build the pinned Charon
 RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
   && cd /opt/aeneas \
   && opam exec --switch=aeneas -- make setup-charon \
-  && cd /opt/aeneas/charon/charon \
-  && TOOLCHAIN="$(awk -F\" '/channel =/ {print $2}' rust-toolchain.toml)" \
+  && cd /opt/aeneas/charon \
+  && TOOLCHAIN="$(grep 'channel =' rust-toolchain* | head -n 1 | cut -d '"' -f 2)" \
   && rustup toolchain install "$TOOLCHAIN" \
   && rustup component add rustfmt --toolchain "$TOOLCHAIN" \
   && cd /opt/aeneas \
