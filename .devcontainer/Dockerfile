@@ -50,7 +50,10 @@ RUN opam exec --switch=aeneas -- opam install -y \
     core_unix \
     odoc \
     unionfind \
-    menhir
+    menhir \
+    domainslib \
+    ocamlgraph \
+    progress
 
 # Clone + build Aeneas, and have it fetch/build the pinned Charon
 RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
