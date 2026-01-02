@@ -1,43 +1,58 @@
 import subprocess, sys, os
 
 def rust_lean(src):
-    # Get name of crate root dir
-    crate_name = os.path.basename(os.path.normpath(src))
-    # LLBC filename (relative to cwd=src below)
+    src_abs = os.path.abspath(src)
+    crate_name = os.path.basename(os.path.normpath(src_abs))
+    
+    spec_root = os.path.join(os.path.dirname(src_abs), 'spec')
+    lean_dir = os.path.join(spec_root, 'Spec')
     llbc_path = crate_name + '.llbc'
 
-    # Spec Lake project (sibling of crate dir)
-    spec_root = os.path.join(os.path.dirname(os.path.abspath(src)), 'spec')
-    # Generate directly into the Spec library folder
-    lean_dir = os.path.join(spec_root, 'Spec')
+    # 1. Generate .llbc
+    subprocess.run(['charon', 'cargo', '--preset=aeneas'], cwd=src_abs, check=True)
 
-    # Remove Basic.lean if it exists
-    basic_lean = os.path.join(lean_dir, "Basic.lean")
-    if os.path.exists(basic_lean):
-        os.remove(basic_lean)
+    # 2. Generate Lean and CAPTURE output
+    #    We assume the log is printed to stdout or stderr.
+    result = subprocess.run(
+        ['aeneas', '-backend', 'lean', '-dest', lean_dir, llbc_path], 
+        cwd=src_abs, 
+        check=True, 
+        capture_output=True, 
+        text=True
+    )
 
-    # Remove Main.lean if it exists (Library-only build)
-    main_lean = os.path.join(spec_root, "Main.lean")
-    if os.path.exists(main_lean):
-        os.remove(main_lean)
+    # 3. Find the generated filename from logs
+    #    Looking for: "[Info ] Generated: /path/to/File.lean"
+    generated_path = None
+    
+    # Check both stdout and stderr just to be safe
+    combined_logs = result.stdout + "\n" + result.stderr
+    
+    for line in combined_logs.splitlines():
+        if "Generated:" in line and line.strip().endswith(".lean"):
+            # Split by "Generated:" and take the last part (the path)
+            generated_path = line.split("Generated:")[-1].strip()
+            break
+            
+    # 4. Process the file
+    #    Derive the module name from the actual filename Aeneas used
+    filename = os.path.basename(generated_path)
+    module_name = os.path.splitext(filename)[0]
+    
+    with open(generated_path, 'r') as f:
+        content = f.read()
 
-    # Wipe Spec.lean clean so it starts empty
-    with open(os.path.join(spec_root, 'Spec.lean'), 'w') as f:
-        f.write("-- This module serves as the root of the `Spec` library.\n")
-        f.write("-- Import modules here that should be built as part of the library.\n\n")
+    # Replace the namespace and write to Extract.lean
+    new_content = content.replace(module_name, "Extract")
 
-    # Generate llbc file
-    subprocess.run(['charon', 'cargo', '--preset=aeneas'], cwd=src, check=True)
+    target_path = os.path.join(lean_dir, "Extract.lean")
+    with open(target_path, 'w') as f:
+        f.write(new_content)
 
-    # Generate Lean into spec/Spec/
-    subprocess.run(['aeneas', '-backend', 'lean', '-dest', lean_dir, llbc_path], cwd=src, check=True)
+    # Delete the original
+    os.remove(generated_path)
 
-    # Convert from snake case to camel to get generated Lean file name / module name
-    lean_name = ''.join(part.capitalize() for part in crate_name.split('_'))
+    return new_content
 
-    # Append import into the Spec root module
-    with open(os.path.join(spec_root, 'Spec.lean'), 'a') as f:
-        f.write(f"import Spec.{lean_name}\n")
-
-    # Return generated Lean
-    return open(os.path.join(lean_dir, f"{lean_name}.lean"), 'r').read()
+if __name__ == "__main__":
+    rust_lean("TestProject")

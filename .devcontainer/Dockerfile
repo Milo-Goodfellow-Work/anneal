@@ -69,28 +69,7 @@ RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
   && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
 
 # ---------- Devcontainer helper scripts ----------
-RUN cat >/usr/local/bin/link-workspace.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-# postCreateCommand runs with CWD = the workspace folder.
-WS="$(pwd)"
-rm -rf /app
-ln -snf "$WS" /app
-echo "Linked /app -> $WS"
-EOF
-RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh && chmod +x /usr/local/bin/link-workspace.sh
-
-RUN cat >/usr/local/bin/init-spec.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="${1:-/app}"
-
-if [ ! -d "$ROOT/spec" ]; then
-  echo "Expected $ROOT/spec to exist (repo should contain spec/)."
-  exit 1
-fi
-
-cd "$ROOT/spec"
-lake build
-EOF
-RUN sed -i 's/\r$//' /usr/local/bin/init-spec.sh && chmod +x /usr/local/bin/init-spec.sh
+COPY scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
+COPY scripts/init-spec.sh /usr/local/bin/init-spec.sh
+RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh \
+ && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh
