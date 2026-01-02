@@ -8,3 +8,8 @@ name = "Spec"
 [[require]]
 name = "aeneas"
 path = "/opt/aeneas/backends/lean"
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "v4.25.2"
