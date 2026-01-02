@@ -2,12 +2,11 @@
 set -euo pipefail
 
 ROOT="${1:-/app}"
-
 cd "$ROOT/spec"
 
-# Make sure Lean toolchain is present, then fetch precompiled olean cache for deps (Mathlib, etc.)
+# Force lake to use the project's pinned toolchain (fixes the mismatch warning)
+export ELAN_TOOLCHAIN="$(tr -d '\r' < lean-toolchain)"
+
 lake update
 lake exe cache get
-
-# Now build *your* project; should be fast because deps come from cache
 lake build
