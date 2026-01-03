@@ -11,7 +11,7 @@
   //
   // We make /app point at the real workspace path in postCreateCommand.
 
-  "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app",
+  //"postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app",
 
   "customizations": {
     "vscode": {
@@ -19,7 +19,7 @@
         "rust-lang.rust-analyzer",
         "leanprover.lean4",
         "ms-python.python",
-        "Google.gemini-code-assist"
+        "google.geminicodeassist"
       ]
     }
   }

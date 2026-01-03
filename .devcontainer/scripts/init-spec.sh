@@ -4,9 +4,10 @@ set -euo pipefail
 ROOT="${1:-/app}"
 cd "$ROOT/spec"
 
-# Force lake to use the project's pinned toolchain (fixes the mismatch warning)
-export ELAN_TOOLCHAIN="$(tr -d '\r' < lean-toolchain)"
+# Ensure the toolchain is installed and use 'elan run' for maximum reliability
+TOOLCHAIN="$(tr -d '\r' < lean-toolchain)"
+elan install "$TOOLCHAIN"
 
-lake update
-lake exe cache get
-lake build
+elan run "$TOOLCHAIN" lake update
+elan run "$TOOLCHAIN" lake exe cache get
+elan run "$TOOLCHAIN" lake build
