@@ -30,15 +30,15 @@ def rust_lean(src):
 
     # Generate Lean using the 'Extract' namespace we standardize
     subprocess.run(
-        ['aeneas', '-backend', 'lean', '-dest', '-namespace',
-            lean_dir, llbc_path, 'Extract'],
+        ['aeneas', '-backend', 'lean', '-dest', lean_dir,
+            '-namespace', 'Extract', llbc_path],
         cwd=src_abs,
         check=True,
     )
 
     # Convert the crate name to camel case, combine to get path
     #    Aeneas uses camel for the Lean file it generates: https://github.com/AeneasVerif/aeneas/blob/47b9e7456ea6b1cd8ee5e1aba15f70ff20f75c04/src/Translate.ml#L1842
-    generated_path = os.path.join(lean_dir, to_camel_case(crate_name))
+    generated_path = os.path.join(lean_dir, to_camel_case(crate_name) + '.lean')
 
     # Write og file content to Extract.lean, then delete the og file
     new_content = None
