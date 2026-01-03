@@ -207,4 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 # Lake (spec project)
-/.lake
+/spec/.lake
