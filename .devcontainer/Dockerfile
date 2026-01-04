@@ -59,17 +59,31 @@ RUN opam exec --switch=aeneas -- opam install -y \
 COPY spec/vendor/aeneas /opt/aeneas
 
 # Build Aeneas + pinned Charon
-RUN cd /opt/aeneas \
-  && opam exec --switch=aeneas -- make setup-charon \
-  && cd /opt/aeneas/charon \
-  && TOOLCHAIN="$(( [ -f rust-toolchain.toml ] && awk -F'\"' '/channel =/ {print $2; exit}' rust-toolchain.toml ) || ( [ -f rust-toolchain ] && tr -d '\r' < rust-toolchain ))" \
-  && echo "Using Rust toolchain: ${TOOLCHAIN}" \
-  && rustup toolchain install "${TOOLCHAIN}" \
-  && rustup component add rustfmt --toolchain "${TOOLCHAIN}" \
-  && cd /opt/aeneas \
-  && opam exec --switch=aeneas -- make \
-  && ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas \
-  && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
+RUN bash -euxo pipefail <<'BASH'
+cd /opt/aeneas
+opam exec --switch=aeneas -- make setup-charon
+
+cd /opt/aeneas/charon
+if [[ -f rust-toolchain.toml ]]; then
+  TOOLCHAIN="$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ {print $2; exit}' rust-toolchain.toml | tr -d '\r')"
+elif [[ -f rust-toolchain ]]; then
+  TOOLCHAIN="$(tr -d '\r\n' < rust-toolchain)"
+else
+  echo "No rust-toolchain(.toml) found in /opt/aeneas/charon" >&2
+  exit 1
+fi
+
+echo "Using Rust toolchain: ${TOOLCHAIN}"
+rustup toolchain install "${TOOLCHAIN}"
+rustup component add rustfmt --toolchain "${TOOLCHAIN}"
+
+cd /opt/aeneas
+opam exec --switch=aeneas -- make
+
+ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas
+ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
+BASH
+
 
 # ---------- Devcontainer helper scripts ----------
 COPY .devcontainer/scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
