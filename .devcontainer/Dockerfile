@@ -6,7 +6,7 @@ ENV OPAMROOT=/root/.opam
 ENV OPAMYES=1
 ENV OPAMNONINTERACTIVE=1
 
-# System deps (bash is important because our scripts use /usr/bin/env bash)
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zstd \
   && rm -rf /var/lib/apt/lists/*
 
-# Rust (for Charon + your Rust project)
+# Rust
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=/root/.cargo/bin:${PATH}
@@ -32,14 +32,14 @@ RUN curl -sSf https://sh.rustup.rs | bash -s -- -y --profile minimal
 RUN curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y
 ENV PATH=/root/.elan/bin:${PATH}
 
-# Python tooling (optional but handy)
+# Python tooling (optional)
 RUN pip install --no-cache-dir black flake8 mypy
 
 # ---------- Aeneas + Charon ----------
 RUN opam init -y --disable-sandboxing --bare --no-setup
 RUN opam switch create aeneas ocaml-base-compiler.5.3.0
 
-# Install OCaml deps you were already using
+# OCaml deps (you already discovered you need these)
 RUN opam exec --switch=aeneas -- opam install -y \
     dune \
     ppx_deriving \
@@ -55,21 +55,24 @@ RUN opam exec --switch=aeneas -- opam install -y \
     ocamlgraph \
     progress
 
-# Clone + build Aeneas, and have it fetch/build the pinned Charon
-RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
-  && cd /opt/aeneas \
+# Copy your vendored fork (no network dependency for it)
+COPY spec/vendor/aeneas /opt/aeneas
+
+# Build Aeneas + pinned Charon
+RUN cd /opt/aeneas \
   && opam exec --switch=aeneas -- make setup-charon \
   && cd /opt/aeneas/charon \
-  && TOOLCHAIN="$(grep 'channel =' rust-toolchain* | head -n 1 | cut -d '"' -f 2)" \
-  && rustup toolchain install "$TOOLCHAIN" \
-  && rustup component add rustfmt --toolchain "$TOOLCHAIN" \
+  && TOOLCHAIN="$(( [ -f rust-toolchain.toml ] && awk -F'\"' '/channel =/ {print $2; exit}' rust-toolchain.toml ) || ( [ -f rust-toolchain ] && tr -d '\r' < rust-toolchain ))" \
+  && echo "Using Rust toolchain: ${TOOLCHAIN}" \
+  && rustup toolchain install "${TOOLCHAIN}" \
+  && rustup component add rustfmt --toolchain "${TOOLCHAIN}" \
   && cd /opt/aeneas \
   && opam exec --switch=aeneas -- make \
   && ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas \
   && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
 
 # ---------- Devcontainer helper scripts ----------
-COPY scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
-COPY scripts/init-spec.sh /usr/local/bin/init-spec.sh
+COPY .devcontainer/scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
+COPY .devcontainer/scripts/init-spec.sh /usr/local/bin/init-spec.sh
 RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh \
  && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh

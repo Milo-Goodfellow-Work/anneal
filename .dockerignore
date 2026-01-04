@@ -1,11 +1,18 @@
-**/.git
+# Git / editor
+.git
+.vscode
+
+# Lean / Lake (CRITICAL: .lake can be a symlink to /var/cache/..., which breaks build context)
 **/.lake
+**/.lake/**
+
+# Rust
 **/target
+**/Cargo.lock
+
+# Node
+**/node_modules
+
+# Python
 **/__pycache__
-**/*.olean
-**/*.ilean
-**/*.cmi
-**/*.cmx
-**/*.o
-**/*.a
-**/*.so
+**/*.pyc

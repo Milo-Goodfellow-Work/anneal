@@ -1,15 +1,13 @@
 {
   "name": "Rust-Lean-LLM Dev",
   "build": {
-    "context": ".",
-    "dockerfile": "Dockerfile"
+    "context": "..",
+    "dockerfile": ".devcontainer/Dockerfile"
   },
 
-  // Do NOT force workspaceMount here.
-  // - If you open a local folder: VS Code bind-mounts it into /workspaces/<repo>.
-  // - If you "Clone Repository in Container Volume": VS Code uses a docker volume (no local mount).
-  //
-  // We make /app point at the real workspace path in postCreateCommand.
+  "mounts": [
+    "type=volume,source=lean-lake-cache,target=/var/cache/lake"
+  ],
 
   "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app",
 
