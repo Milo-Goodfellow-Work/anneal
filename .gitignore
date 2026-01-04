@@ -208,3 +208,6 @@ __marimo__/
 
 # Lake (spec project)
 .lake
+
+# vendored aeneas: ignore generated/odd artifacts
+spec/vendor/aeneas/doc.html

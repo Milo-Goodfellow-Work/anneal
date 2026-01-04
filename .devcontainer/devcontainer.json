@@ -2,15 +2,12 @@
   "name": "Rust-Lean-LLM Dev",
   "build": {
     "context": "..",
-    "dockerfile": ".devcontainer/Dockerfile"
+    "dockerfile": "Dockerfile"
   },
-
   "mounts": [
     "type=volume,source=lean-lake-cache,target=/var/cache/lake"
   ],
-
   "postCreateCommand": "/usr/local/bin/link-workspace.sh && /usr/local/bin/init-spec.sh /app",
-
   "customizations": {
     "vscode": {
       "extensions": [
