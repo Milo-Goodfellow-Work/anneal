@@ -1,2 +1,13 @@
-# Never allow Windows CRLF to break Linux shebang scripts
+# Default: normalize text files and store as LF in the repo
+* text=auto eol=lf
+
+# Force LF for files that break badly with CRLF
+Dockerfile* text eol=lf
+.devcontainer/** text eol=lf
 *.sh text eol=lf
+*.bash text eol=lf
+
+# (Optional) Windows scripts that actually want CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
