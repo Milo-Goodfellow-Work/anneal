@@ -8,18 +8,18 @@ ENV OPAMNONINTERACTIVE=1
 
 # System deps (bash is important because our scripts use /usr/bin/env bash)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    git \
-    build-essential \
-    pkg-config \
-    libgmp-dev \
-    opam \
-    m4 \
-    unzip \
-    xz-utils \
-    zstd \
+  bash \
+  ca-certificates \
+  curl \
+  git \
+  build-essential \
+  pkg-config \
+  libgmp-dev \
+  opam \
+  m4 \
+  unzip \
+  xz-utils \
+  zstd \
   && rm -rf /var/lib/apt/lists/*
 
 # Rust (for Charon + your Rust project)
@@ -41,35 +41,52 @@ RUN opam switch create aeneas ocaml-base-compiler.5.3.0
 
 # Install OCaml deps you were already using
 RUN opam exec --switch=aeneas -- opam install -y \
-    dune \
-    ppx_deriving \
-    visitors \
-    easy_logging \
-    zarith \
-    yojson \
-    core_unix \
-    odoc \
-    unionfind \
-    menhir \
-    domainslib \
-    ocamlgraph \
-    progress
+  dune \
+  ppx_deriving \
+  visitors \
+  easy_logging \
+  zarith \
+  yojson \
+  core_unix \
+  odoc \
+  unionfind \
+  menhir \
+  domainslib \
+  ocamlgraph \
+  progress
 
 # Clone + build Aeneas, and have it fetch/build the pinned Charon
-RUN git clone --depth 1 https://github.com/AeneasVerif/aeneas /opt/aeneas \
+COPY vendors/aeneas /opt/aeneas
+RUN cd /opt/aeneas \
+  && PINNED=$(tail -1 charon-pin) \
+  && git clone https://github.com/AeneasVerif/charon \
+  && cd charon \
+  && git checkout $PINNED \
+  && . /root/.cargo/env \
+  && TOOLCHAIN=$(grep -h 'channel =' rust-toolchain rust-toolchain.toml 2>/dev/null | head -n 1 | cut -d '"' -f 2) \
+  && rustup toolchain install $TOOLCHAIN \
+  && rustup component add rustfmt --toolchain $TOOLCHAIN \
   && cd /opt/aeneas \
   && opam exec --switch=aeneas -- make setup-charon \
-  && cd /opt/aeneas/charon \
-  && TOOLCHAIN="$(grep 'channel =' rust-toolchain* | head -n 1 | cut -d '"' -f 2)" \
-  && rustup toolchain install "$TOOLCHAIN" \
-  && rustup component add rustfmt --toolchain "$TOOLCHAIN" \
-  && cd /opt/aeneas \
-  && opam exec --switch=aeneas -- make \
+  && opam exec --switch=aeneas -- make build \
   && ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas \
   && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
+
+
+# ---------- Pre-bake Mathlib Cache ----------
+# Copy spec and download cache so it's part of the image.
+# This avoids slow downloads on bind-mounts during devcontainer startup.
+COPY spec /opt/spec
+RUN cd /opt/spec \
+  && . /root/.cargo/env \
+  # Fix the lakefile path to point to the installed aeneas in /opt/aeneas
+  # (Since we aren't mounting the full workspace at /workspaces/anneal yet)
+  && sed -i 's|path = "./Aeneas"|path = "../aeneas"|' lakefile.toml \
+  && lake exe cache get \
+  && lake build -v
 
 # ---------- Devcontainer helper scripts ----------
 COPY scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
 COPY scripts/init-spec.sh /usr/local/bin/init-spec.sh
 RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh \
- && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh
+  && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh
