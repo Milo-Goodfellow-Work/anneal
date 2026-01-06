@@ -57,8 +57,9 @@ RUN opam exec --switch=aeneas -- opam install -y \
 
 # Clone + build Aeneas, and have it fetch/build the pinned Charon
 COPY vendors/aeneas /opt/aeneas
+RUN find /opt/aeneas -type f -exec sed -i 's/\r$//' {} +
 RUN cd /opt/aeneas \
-  && PINNED=$(tail -1 charon-pin) \
+  && PINNED=$(tail -1 charon-pin | tr -d '\r') \
   && git clone https://github.com/AeneasVerif/charon \
   && cd charon \
   && git checkout $PINNED \
@@ -68,6 +69,7 @@ RUN cd /opt/aeneas \
   && rustup component add rustfmt --toolchain $TOOLCHAIN \
   && cd /opt/aeneas \
   && opam exec --switch=aeneas -- make setup-charon \
+  && cd charon && opam exec --switch=aeneas -- opam install . -y && cd .. \
   && opam exec --switch=aeneas -- make build \
   && ln -sf /opt/aeneas/bin/aeneas /usr/local/bin/aeneas \
   && ln -sf /opt/aeneas/charon/bin/charon /usr/local/bin/charon
@@ -86,7 +88,7 @@ RUN cd /opt/spec \
   && lake build -v
 
 # ---------- Devcontainer helper scripts ----------
-COPY scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
-COPY scripts/init-spec.sh /usr/local/bin/init-spec.sh
+COPY .devcontainer/scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
+COPY .devcontainer/scripts/init-spec.sh /usr/local/bin/init-spec.sh
 RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh \
   && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh
