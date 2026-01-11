@@ -13,11 +13,19 @@ from pprint import pformat
 from openai import OpenAI
 
 # ---------------- Configuration ----------------
+# Standard configuration for the Anneal workspace
+# These will be updated dynamically if run_agent is called with different paths
 SECRETS_FILE = Path("secrets.toml")
 SPEC_DIR = Path("spec")
 GEMSPEC_PATH = SPEC_DIR / "Spec" / "GemSpec.lean"
 EXTRACT_PATH = SPEC_DIR / "Spec" / "Extract.lean"
+
+# The "Rust Project" directory. In the test repo, it is "TestProject".
+# In a real repo, it might be "." (the root).
 TEST_PROJECT_DIR = Path("TestProject")
+
+# ALLOWED_FILES will be populated at runtime
+ALLOWED_FILES: set[str] = set()
 
 MODEL_ID = "gpt-5.1-codex"
 MAX_TURNS = 80
@@ -34,7 +42,11 @@ def trunc(s: str, n: int = PRINT_TRUNC) -> str:
 
 def load_secrets() -> dict:
     if not SECRETS_FILE.exists():
-        raise FileNotFoundError(f"{SECRETS_FILE} not found.")
+        # Fallback: check if we have env var (for Cloud Run)
+        key = os.environ.get("OPENAI_API_KEY")
+        if key:
+            return {"secrets": {"OPENAI_API_KEY": key}}
+        raise FileNotFoundError(f"{SECRETS_FILE} not found and OPENAI_API_KEY not in env.")
     with SECRETS_FILE.open("rb") as f:
         return tomllib.load(f)
 
@@ -70,8 +82,6 @@ def build_allowlist(roots: list[Path]) -> set[str]:
                     
     log(f"Allowlist built in {time.time() - start_t:.2f}s, {len(files)} files.")
     return files
-
-ALLOWED_FILES: set[str] = set()
 
 # ---------------- Tools ----------------
 def cat_file(relative_path: str) -> str:
@@ -257,18 +267,33 @@ def map_function_calls(tool_calls):
             })
     return calls
 
-def main():
-    global ALLOWED_FILES
-    log("=== Boot (OpenAI Responses API) ===")
+def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
+    """
+    Run the agent loop.
+    :param project_root: The root of the workspace (where main.py is assumed to run).
+    :param rust_subdir: Subdirectory containing the Rust project (e.g. 'src' or '.').
+    """
+    global ALLOWED_FILES, TEST_PROJECT_DIR, SPEC_DIR, GEMSPEC_PATH, EXTRACT_PATH
+    
+    # Update paths based on arguments
+    TEST_PROJECT_DIR = project_root / rust_subdir
+    SPEC_DIR = project_root / "spec"
+    GEMSPEC_PATH = SPEC_DIR / "Spec" / "GemSpec.lean"
+    EXTRACT_PATH = SPEC_DIR / "Spec" / "Extract.lean"
+    
+    log(f"=== Boot (OpenAI Responses API) ===")
     log(f"MODEL_ID: {MODEL_ID}")
+    log(f"Workspace Root: {project_root.resolve()}")
+    log(f"Rust Project: {TEST_PROJECT_DIR}")
+    log(f"Spec Dir: {SPEC_DIR}")
     
     ALLOWED_FILES = build_allowlist([TEST_PROJECT_DIR, SPEC_DIR])
     
     secrets = load_secrets()
     api_key = secrets.get("secrets", {}).get("OPENAI_API_KEY")
     if not api_key or api_key == "INSERT_YOUR_KEY_HERE":
-        log("Error: OPENAI_API_KEY missing in secrets.toml.")
-        sys.exit(1)
+        log("Error: OPENAI_API_KEY missing in secrets.toml/env.")
+        return # Exit gracefully
         
     client = OpenAI(api_key=api_key)
     
@@ -277,13 +302,13 @@ def main():
     else:
         extract_content = "Error: Extract.lean not found."
     
-    # Path B: Use a prompt string for the first input
+    # Initialize Context
     initial_prompt = f"""You are an expert formal verification engineer specializing in Lean 4 and Rust.
 Your goal is to generate a valid Lean 4 specification file (`GemSpec.lean`) that formally checks the extracted code in `Extract.lean`.
 
 Context:
-`Extract.lean` content is located at `spec/Spec/Extract.lean`.
-`GemSpec.lean` will be located at `spec/Spec/GemSpec.lean`.
+`Extract.lean` content is located at `{EXTRACT_PATH.relative_to(project_root)}`.
+`GemSpec.lean` will be located at `{GEMSPEC_PATH.relative_to(project_root)}`.
 
 `Extract.lean` content:
 ```lean
@@ -292,7 +317,7 @@ Context:
 
 Instructions:
 1. Start by calling `list_files` (e.g., `list_files(".")`) to see the project root.
-2. Explore code using `cat_file` (e.g., `cat_file("spec/Spec/Extract.lean")` or `cat_file("TestProject/src/main.rs")`).
+2. Explore code using `cat_file`.
 3. Generate `GemSpec.lean` specifying the properties. IMPORTANT: Do NOT prove the theorems. Use `sorry` for all proofs.
 4. Call `submit_final_spec` to submit your work and verify.
     - If it returns "Success", you are done. The loop will stop.
@@ -300,10 +325,6 @@ Instructions:
 """
     
     log("--- Starting Responses Loop ---")
-    
-    # We maintain the "current input" to send to the model.
-    # Initially, it's just the user prompt.
-    # Subsequently, it will be the list of tool outputs from the *previous* turn.
     current_input = initial_prompt
     previous_response_id = None
     
@@ -385,6 +406,9 @@ Instructions:
             
         # Update current_input for the next turn
         current_input = tool_outputs
+
+def main():
+    run_agent()
 
 if __name__ == "__main__":
     main()
