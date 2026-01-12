@@ -5,9 +5,7 @@ defaultTargets = ["Spec"]
 [[lean_lib]]
 name = "Spec"
 
-[[require]]
-name = "aeneas"
-path = "./Aeneas"
+
 
 [[require]]
 name = "mathlib"

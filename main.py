@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import asyncio
 import sys
 import time
 import tomllib
@@ -11,6 +12,10 @@ from pathlib import Path
 from pprint import pformat
 
 from openai import OpenAI
+try:
+    import aristotlelib
+except ImportError:
+    aristotlelib = None
 
 # ---------------- Configuration ----------------
 # Standard configuration for the Anneal workspace
@@ -46,6 +51,10 @@ def load_secrets() -> dict:
         key = os.environ.get("OPENAI_API_KEY")
         if key:
             return {"secrets": {"OPENAI_API_KEY": key}}
+        # Check for other keys just in case
+        aristotle_key = os.environ.get("ARISTOTLE_API_KEY") 
+        if aristotle_key:
+             return {"secrets": {"OPENAI_API_KEY": key, "ARISTOTLE_API_KEY": aristotle_key}}
         raise FileNotFoundError(f"{SECRETS_FILE} not found and OPENAI_API_KEY not in env.")
     with SECRETS_FILE.open("rb") as f:
         return tomllib.load(f)
@@ -278,7 +287,7 @@ def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
     # Update paths based on arguments
     TEST_PROJECT_DIR = project_root / rust_subdir
     SPEC_DIR = project_root / "spec"
-    GEMSPEC_PATH = SPEC_DIR / "Spec" / "GemSpec.lean"
+    GEMSPEC_PATH = SPEC_DIR / "Spec" / "Verif.lean"
     EXTRACT_PATH = SPEC_DIR / "Spec" / "Extract.lean"
     
     log(f"=== Boot (OpenAI Responses API) ===")
@@ -304,11 +313,11 @@ def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
     
     # Initialize Context
     initial_prompt = f"""You are an expert formal verification engineer specializing in Lean 4 and Rust.
-Your goal is to generate a valid Lean 4 specification file (`GemSpec.lean`) that formally checks the extracted code in `Extract.lean`.
+Your goal is to generate a valid Lean 4 specification file (`Verif.lean`) that formally checks the extracted code in `Extract.lean`.
 
 Context:
 `Extract.lean` content is located at `{EXTRACT_PATH.relative_to(project_root)}`.
-`GemSpec.lean` will be located at `{GEMSPEC_PATH.relative_to(project_root)}`.
+`Verif.lean` will be located at `{GEMSPEC_PATH.relative_to(project_root)}`.
 
 `Extract.lean` content:
 ```lean
@@ -318,7 +327,14 @@ Context:
 Instructions:
 1. Start by calling `list_files` (e.g., `list_files(".")`) to see the project root.
 2. Explore code using `cat_file`.
-3. Generate `GemSpec.lean` specifying the properties. IMPORTANT: Do NOT prove the theorems. Use `sorry` for all proofs.
+3. Generate `Verif.lean` specifying the properties. 
+    - **CRITICAL PRINCIPLE**: Think critically about what the code *actually* does, not just the "happy path".
+    - Your specifications must be mathematically rigorous. They should capture the true behavior, including when and why the code might fail.
+    - **Example (Result Types)**: Rust functions returning `Result T` (like integer addition) will fail on overflow. 
+        - Naively asserting `add a b = ok (a + b)` is FALSE because it ignores the overflow case.
+        - A correct spec adds preconditions: `theorem add_safe ... (h : inBounds ...) : add ... = ok ...`
+    - Apply this reasoning globally: look for implicit invariants, state dependencies, or partial functions and constrain your theorems accordingly.
+    - Do NOT prove the theorems. Use `sorry` for all proofs.
 4. Call `submit_final_spec` to submit your work and verify.
     - If it returns "Success", you are done. The loop will stop.
     - If it returns build errors or submission failure (e.g. missing `sorry`), analyze them and retry by calling `submit_final_spec` again with fixed content.
@@ -386,6 +402,81 @@ Instructions:
                     
                     if func_name == "submit_final_spec" and result_str.strip() == "Success":
                          log("!!! SUCCESS VERIFIED !!!")
+                         
+                         # --- Aristotle Integration ---
+                         aristotle_key = secrets.get("secrets", {}).get("ARISTOTLE_API_KEY")
+                         if not aristotle_key or "INSERT" in aristotle_key:
+                             log("Warning: ARISTOTLE_API_KEY not configured. Skipping automated proving.")
+                             return
+
+                         if not aristotlelib:
+                             log("Warning: aristotlelib not installed. Skipping automated proving.")
+                             return
+
+                         log("=== Calling Aristotle (Vibe Proving) ===")
+                         os.environ["ARISTOTLE_API_KEY"] = aristotle_key
+                         
+                         try:
+                             # Using prove_from_file with auto_add_imports=True (built-in way to handle context)
+                             # validate_lean_project=True ensures checking the project structure
+                             log(f"Submitting {GEMSPEC_PATH} to Aristotle...")
+                             
+                             # Note: prove_from_file returns the path to the solution OR project_id if async.
+                             # Default is wait_for_completion=True.
+                             # Change CWD to spec dir so aristotlelib/lake can resolve relative paths
+                             original_cwd = os.getcwd()
+                             os.chdir(SPEC_DIR)
+                             log(f"Changed CWD to {SPEC_DIR} for Aristotle call")
+                             
+                             try:
+                                 # It is an async function, so we must run it in an event loop.
+                                 # Note: input_file_path should be relative to the new CWD or absolute. 
+                                 # GEMSPEC_PATH is relative to root (spec/Spec/GemSpec.lean).
+                                 # We are in spec/, so we want Spec/GemSpec.lean.
+                                 target_file = GEMSPEC_PATH.relative_to(SPEC_DIR)
+                                 
+                                 result = asyncio.run(aristotlelib.Project.prove_from_file(
+                                     input_file_path=str(target_file),
+                                     auto_add_imports=True,
+                                     validate_lean_project=True,
+                                     wait_for_completion=True
+                                 ))
+                             finally:
+                                 os.chdir(original_cwd)
+                                 log(f"Restored CWD to {original_cwd}")
+                             
+                             log(f"Aristotle Proof Complete. Result saved to: {result}")
+                             
+                             # If result is a path, let's copy/rename it to GemSpec.lean to become the canonical source
+                             # Result is relative to SPEC_DIR because we ran it there
+                             result_path = SPEC_DIR / result
+                             if result_path.exists():
+                                 # Backup original just in case (optional, but polite)
+                                 # GEMSPEC_PATH.rename(GEMSPEC_PATH.with_suffix(".lean.bak"))
+                                 
+                                 # Overwrite
+                                 result_path.rename(GEMSPEC_PATH)
+                                 log(f"Final proved spec saved to: {GEMSPEC_PATH} (overwriting original)")
+
+                                 # Run final verification build
+                                 log("Running final `lake build` to verify proved spec...")
+                                 build_res = subprocess.run(
+                                     ["lake", "build"],
+                                     cwd=str(SPEC_DIR),
+                                     capture_output=True,
+                                     text=True,
+                                     check=False
+                                 )
+                                 if build_res.returncode == 0:
+                                     log("!!! FINAL BUILD SUCCESSFUL !!!")
+                                 else:
+                                     log(f"Warning: Final build failed (exit={build_res.returncode}). Check GemSpec.lean manually.")
+                                     log(f"STDERR: {build_res.stderr}")
+                             
+                         except Exception as ari_err:
+                             log(f"Aristotle Error: {ari_err}")
+                             # We don't fail the whole agent run, as spec generation was successful.
+                         
                          return
 
                     # Construct proper tool output item for next input
