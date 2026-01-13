@@ -86,9 +86,3 @@ RUN cd /opt/spec \
   && sed -i 's|path = "./Aeneas"|path = "../aeneas"|' lakefile.toml \
   && lake exe cache get \
   && lake build -v
-
-# ---------- Devcontainer helper scripts ----------
-COPY .devcontainer/scripts/link-workspace.sh /usr/local/bin/link-workspace.sh
-COPY .devcontainer/scripts/init-spec.sh /usr/local/bin/init-spec.sh
-RUN sed -i 's/\r$//' /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh \
-  && chmod +x /usr/local/bin/link-workspace.sh /usr/local/bin/init-spec.sh
