@@ -1,7 +1,0 @@
-import Lake
-open Lake DSL
-
-require aeneas from "../../backends/lean"
-
-package «tests» {}
-

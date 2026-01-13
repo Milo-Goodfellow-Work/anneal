@@ -1,11 +1,9 @@
 {
   "name": "Rust-Lean-LLM Dev",
   "image": "rust-lean-llm-dev",
-  "postCreateCommand": "/usr/local/bin/link-workspace.sh",
   "customizations": {
     "vscode": {
       "extensions": [
-        "rust-lang.rust-analyzer",
         "leanprover.lean4",
         "ms-python.python",
         "google.geminicodeassist"

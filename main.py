@@ -23,7 +23,7 @@ except ImportError:
 SECRETS_FILE = Path("secrets.toml")
 SPEC_DIR = Path("spec")
 GEMSPEC_PATH = SPEC_DIR / "Spec" / "GemSpec.lean"
-EXTRACT_PATH = SPEC_DIR / "Spec" / "Extract.lean"
+PROGRAM_PATH = SPEC_DIR / "Spec" / "Program.lean"
 
 # The "Rust Project" directory. In the test repo, it is "TestProject".
 # In a real repo, it might be "." (the root).
@@ -282,13 +282,13 @@ def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
     :param project_root: The root of the workspace (where main.py is assumed to run).
     :param rust_subdir: Subdirectory containing the Rust project (e.g. 'src' or '.').
     """
-    global ALLOWED_FILES, TEST_PROJECT_DIR, SPEC_DIR, GEMSPEC_PATH, EXTRACT_PATH
+    global ALLOWED_FILES, TEST_PROJECT_DIR, SPEC_DIR, GEMSPEC_PATH, PROGRAM_PATH
     
     # Update paths based on arguments
     TEST_PROJECT_DIR = project_root / rust_subdir
     SPEC_DIR = project_root / "spec"
     GEMSPEC_PATH = SPEC_DIR / "Spec" / "Verif.lean"
-    EXTRACT_PATH = SPEC_DIR / "Spec" / "Extract.lean"
+    PROGRAM_PATH = SPEC_DIR / "Spec" / "Program.lean"
     
     log(f"=== Boot (OpenAI Responses API) ===")
     log(f"MODEL_ID: {MODEL_ID}")
@@ -306,22 +306,22 @@ def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
         
     client = OpenAI(api_key=api_key)
     
-    if EXTRACT_PATH.exists():
-        extract_content = EXTRACT_PATH.read_text(encoding="utf-8")
+    if PROGRAM_PATH.exists():
+        program_content = PROGRAM_PATH.read_text(encoding="utf-8")
     else:
-        extract_content = "Error: Extract.lean not found."
+        program_content = "Error: Program.lean not found."
     
     # Initialize Context
-    initial_prompt = f"""You are an expert formal verification engineer specializing in Lean 4 and Rust.
-Your goal is to generate a valid Lean 4 specification file (`Verif.lean`) that formally checks the extracted code in `Extract.lean`.
+    initial_prompt = f"""You are an expert formal verification engineer specializing in Lean 4.
+Your goal is to generate a valid Lean 4 specification file (`Verif.lean`) that formally checks the content in `Program.lean`.
 
 Context:
-`Extract.lean` content is located at `{EXTRACT_PATH.relative_to(project_root)}`.
+`Program.lean` content is located at `{PROGRAM_PATH.relative_to(project_root)}`.
 `Verif.lean` will be located at `{GEMSPEC_PATH.relative_to(project_root)}`.
 
-`Extract.lean` content:
+`Program.lean` content:
 ```lean
-{extract_content}
+{program_content}
 ```
 
 Instructions:
@@ -329,11 +329,8 @@ Instructions:
 2. Explore code using `cat_file`.
 3. Generate `Verif.lean` specifying the properties. 
     - **CRITICAL PRINCIPLE**: Think critically about what the code *actually* does, not just the "happy path".
-    - Your specifications must be mathematically rigorous. They should capture the true behavior, including when and why the code might fail.
-    - **Example (Result Types)**: Rust functions returning `Result T` (like integer addition) will fail on overflow. 
-        - Naively asserting `add a b = ok (a + b)` is FALSE because it ignores the overflow case.
-        - A correct spec adds preconditions: `theorem add_safe ... (h : inBounds ...) : add ... = ok ...`
-    - Apply this reasoning globally: look for implicit invariants, state dependencies, or partial functions and constrain your theorems accordingly.
+    - Your specifications must be mathematically rigorous. they should capture the true behavior.
+    - If `Program.lean` contains functions with error modes (e.g. `Result`), account for them.
     - Do NOT prove the theorems. Use `sorry` for all proofs.
 4. Call `submit_final_spec` to submit your work and verify.
     - If it returns "Success", you are done. The loop will stop.
