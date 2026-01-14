@@ -8,37 +8,35 @@ import sys
 import time
 import tomllib
 import json
+import shutil
+import re
 from pathlib import Path
-from pprint import pformat
+from typing import List, Optional, Dict, Tuple, Any
+from dataclasses import dataclass
 
 from openai import OpenAI
+
 try:
     import aristotlelib
 except ImportError:
     aristotlelib = None
 
 # ---------------- Configuration ----------------
-# Standard configuration for the Anneal workspace
-# These will be updated dynamically if run_agent is called with different paths
 SECRETS_FILE = Path("secrets.toml")
 SPEC_DIR = Path("spec")
-GEMSPEC_PATH = SPEC_DIR / "Spec" / "GemSpec.lean"
-PROGRAM_PATH = SPEC_DIR / "Spec" / "Program.lean"
+SPEC_SRC_DIR = SPEC_DIR / "Spec"
+EXAMPLES_DIR = Path("examples")
 
-# The "Rust Project" directory. In the test repo, it is "TestProject".
-# In a real repo, it might be "." (the root).
-TEST_PROJECT_DIR = Path("TestProject")
-
-# ALLOWED_FILES will be populated at runtime
-ALLOWED_FILES: set[str] = set()
-
-MODEL_ID = "gpt-5.1-codex"
-MAX_TURNS = 80
+MODEL_ID = "gpt-5.2"
 PRINT_TRUNC = 4000
+
+# Safety limits (avoid accidentally stuffing the model context with huge blobs)
+MAX_TOOL_READ_CHARS = 80_000
+MAX_REPAIR_TURNS = 30
 
 # ---------------- Utilities ----------------
 def log(msg: str) -> None:
-    print(msg, flush=True)
+    print(f"[Anneal] {msg}", flush=True)
 
 def trunc(s: str, n: int = PRINT_TRUNC) -> str:
     if s is None:
@@ -47,456 +45,820 @@ def trunc(s: str, n: int = PRINT_TRUNC) -> str:
 
 def load_secrets() -> dict:
     if not SECRETS_FILE.exists():
-        # Fallback: check if we have env var (for Cloud Run)
         key = os.environ.get("OPENAI_API_KEY")
         if key:
-            return {"secrets": {"OPENAI_API_KEY": key}}
-        # Check for other keys just in case
-        aristotle_key = os.environ.get("ARISTOTLE_API_KEY") 
-        if aristotle_key:
-             return {"secrets": {"OPENAI_API_KEY": key, "ARISTOTLE_API_KEY": aristotle_key}}
+            aristotle_key = os.environ.get("ARISTOTLE_API_KEY")
+            secrets = {"OPENAI_API_KEY": key}
+            if aristotle_key:
+                secrets["ARISTOTLE_API_KEY"] = aristotle_key
+            return {"secrets": secrets}
         raise FileNotFoundError(f"{SECRETS_FILE} not found and OPENAI_API_KEY not in env.")
     with SECRETS_FILE.open("rb") as f:
         return tomllib.load(f)
 
-def build_allowlist(roots: list[Path]) -> set[str]:
-    files: set[str] = set()
-    ignore_dirs = {".lake", ".git", ".github", "target", "__pycache__", "lake-packages"}
-    
-    log("Building allowlist...")
-    start_t = time.time()
-    
-    base_cwd = Path.cwd().resolve()
+def list_project_files(base_dir: Path) -> List[str]:
+    files: List[str] = []
+    if not base_dir.exists():
+        return files
+    for root, dirs, filenames in os.walk(base_dir):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if "__pycache__" in dirs:
+            dirs.remove("__pycache__")
+        for fn in filenames:
+            abs_p = Path(root) / fn
+            rel_p = abs_p.relative_to(base_dir)
+            files.append(str(rel_p))
+    return sorted(files)
 
-    for root in roots:
-        # Resolve root to absolute to ensure os.walk yields absolute paths if we pass absolute, 
-        # or we just be careful. Ideally we pass absolute root.
-        root_abs = root.resolve()
-        
-        if not root_abs.exists():
-            continue
-        
-        # optimized walk
-        for dirpath, dirnames, filenames in os.walk(root_abs):
-            # Prune ignored directories in-place
-            dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
-            
-            for f in filenames:
-                p_abs = Path(dirpath) / f
-                try:
-                    rel = p_abs.relative_to(base_cwd).as_posix()
-                    files.add(rel)
-                except ValueError:
-                    pass
-                    
-    log(f"Allowlist built in {time.time() - start_t:.2f}s, {len(files)} files.")
-    return files
+def list_lean_files(base_dir: Path) -> List[str]:
+    files: List[str] = []
+    if not base_dir.exists():
+        return files
+    for root, dirs, filenames in os.walk(base_dir):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        if "__pycache__" in dirs:
+            dirs.remove("__pycache__")
+        for fn in filenames:
+            if fn.endswith(".lean"):
+                abs_p = Path(root) / fn
+                rel_p = abs_p.relative_to(base_dir)
+                files.append(str(rel_p))
+    return sorted(files)
 
-# ---------------- Tools ----------------
-def cat_file(relative_path: str) -> str:
-    """Reads and returns the content of a file from allowlisted directories."""
-    rp = Path(relative_path).as_posix()
-    if rp not in ALLOWED_FILES:
-        # Check if it was just a matter of ./ prefix
-        if rp.startswith("./") and rp[2:] in ALLOWED_FILES:
-             rp = rp[2:]
-        else:
-            return f"Error: Access denied. '{rp}' is not in the allowlist."
-    
-    target_path = Path(rp).resolve()
-    try:
-        return target_path.read_text(encoding="utf-8")
-    except Exception as e:
-        return f"Error reading file '{rp}': {e}"
-
-def list_files(relative_path: str = ".") -> str:
-    """Lists files in the project (directory listing)."""
-    target = Path(relative_path).resolve()
-    base = Path.cwd().resolve()
-    
-    # Security: Ensure we are within CWD and explicitly allowed roots or CWD itself
-    # We want to allow listing '.' (CWD), 'TestProject', 'spec'
-    
-    try:
-        rel = target.relative_to(base)
-    except ValueError:
-        return f"Error: Access denied. '{relative_path}' is outside project root."
-    
-    # Simple check: target must be CWD or inside one of the allowlisted roots?
-    # Actually, if we just rely on cat_file being strict, list_files can be looser,
-    # BUT we don't want to list .git or secrets.
-    
-    if not target.exists():
-        return f"Error: Path not found: {relative_path}"
-    if not target.is_dir():
-        return f"Error: Not a directory: {relative_path}"
-    
-    entries = []
-    for p in sorted(target.iterdir()):
-        # Hide hidden files/dirs (like .git, .devcontainer)
-        if p.name.startswith("."):
-            continue
-        # Hide sensitive files
-        if p.name == "secrets.toml":
-            continue
-        entries.append(p.name + ("/" if p.is_dir() else ""))
-        
-    return "\n".join(entries)
-
-import re
-
-def verify_sorries(content: str) -> str | None:
-    """
-    Parses Lean content to ensure every theorem/lemma is proven with 'sorry'.
-    Returns None if valid, or an error message string if invalid.
-    """
-    # Regex to find theorem declarations and their bodies
-    # Matches: (protected/private) theorem/lemma <name> ... := <body> ending at next decl or EOF
-    # We look for the ':=', then check if the immediate body starts with 'sorry' or 'by sorry'.
-    
-    decl_pattern = re.compile(
-        r'^\s*(?:private\s+|protected\s+)?(?:theorem|lemma)\s+(?P<name>\S+)[\s\S]*?:=\s*(?P<body>[\s\S]*?)(?=\n\s*(?:theorem|lemma|def|structure|inductive|class|section|namespace|end|#|\Z))', 
-        re.MULTILINE
-    )
-    
-    # Simple check: scan line by line for 'theorem' / 'lemma' is harder due to multiline sigs.
-    # The regex above relies on conventions (next decl starts at start of line).
-    
-    # A safer, simpler approach: 
-    # Find start of every theorem/lemma, find the next ':=', checks what follows.
-    
-    matches = list(decl_pattern.finditer(content))
-    if not matches:
-        # If regex missed everything but 'theorem' is present, that's suspicious.
-        if "theorem" in content or "lemma" in content:
-            # Fallback simple check
-            pass
-        else:
-             return None # No theorems, maybe just defs?
-
-    for m in matches:
-        name = m.group("name")
-        body = m.group("body").strip()
-        
-        # Check if body starts with 'sorry' or 'by sorry'
-        is_sorry = body.startswith("sorry") or body.startswith("by sorry") or body.startswith("by\n  sorry")
-        
-        if not is_sorry:
-            return (
-                f"Verification Failed: Theorem '{name}' is not sorry'd.\n"
-                f"Body starts with: '{trunc(body, 50)}'\n"
-                "You must prove ALL theorems using ':= sorry' or ':= by sorry'."
-            )
-            
-    return None
-
-def submit_final_spec(content: str) -> str:
-    """
-    Writes the content to spec/Spec/GemSpec.lean and runs `lake build`.
-    This is the FINAL step to verify and submit the specification.
-    """
-    # Robust check for sorries
-    error = verify_sorries(content)
-    if error:
-        return error
-
-    try:
-        GEMSPEC_PATH.parent.mkdir(parents=True, exist_ok=True)
-        GEMSPEC_PATH.write_text(content, encoding="utf-8")
-    except Exception as e:
-        return f"Error writing GemSpec.lean: {e}"
-    
+def run_lake_build(cwd: Path) -> str:
     start = time.time()
     try:
-        result = subprocess.run(
+        res = subprocess.run(
             ["lake", "build"],
-            cwd=str(SPEC_DIR),
+            cwd=str(cwd),
             capture_output=True,
             text=True,
             check=False,
         )
+        elapsed = time.time() - start
+        if res.returncode == 0:
+            return f"Build Success ({elapsed:.2f}s)"
+        return f"Build Failed (exit={res.returncode}, {elapsed:.2f}s):\n{res.stderr}\n{res.stdout}"
     except Exception as e:
-        return f"Error executing build command: {e}"
-    elapsed = time.time() - start
-    
-    if result.returncode == 0:
-        return "Success"
-    return (
-        f"Build Failed (exit={result.returncode}, elapsed={elapsed:.2f}s)\n\n"
-        f"--- STDERR ---\n{result.stderr}\n\n"
-        f"--- STDOUT ---\n{result.stdout}"
-    )
+        return f"Error running lake build: {e}"
+
+def _safe_relpath(p: str) -> str:
+    p = p.replace("\\", "/").lstrip("/")
+    if p == "" or p == ".":
+        raise ValueError("Empty path")
+    # Prevent traversal
+    parts = [x for x in p.split("/") if x not in ("", ".")]
+    if any(x == ".." for x in parts):
+        raise ValueError(f"Path traversal not allowed: {p}")
+    return "/".join(parts)
+
+def _read_text_file(p: Path) -> str:
+    return p.read_text(encoding="utf-8", errors="replace")
+
+def _write_text_file(p: Path, content: str) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+
+def _slug_to_camel(s: str) -> str:
+    # Turn "order_engine" or "src/engine" into "OrderEngine" / "SrcEngine"
+    parts = re.split(r"[^A-Za-z0-9]+", s)
+    parts = [x for x in parts if x]
+    if not parts:
+        return "X"
+    out = "".join(x[:1].upper() + x[1:] for x in parts)
+    if out and out[0].isdigit():
+        out = "X" + out
+    return out
+
+def _lean_out_path_for_source(project: str, src_rel: str, used: Dict[str, int]) -> str:
+    src = Path(src_rel)
+    stem = src.stem
+    parent = str(src.parent).replace("\\", "/")
+    if parent in (".", ""):
+        base = _slug_to_camel(stem)
+    else:
+        base = _slug_to_camel(parent.replace("/", "_") + "_" + stem)
+    name = base
+    if name in used:
+        used[name] += 1
+        name = f"{name}{used[name]}"
+    else:
+        used[name] = 1
+    return f"{project}/{name}.lean"
+
+def _is_source_file(rel: str) -> bool:
+    ext = Path(rel).suffix.lower()
+    return ext in {".c", ".h", ".cc", ".cpp", ".hpp"}
+
+# ---------------- Tool Schema ----------------
+def _tool(name: str, description: str, properties: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        },
+    }
 
 TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "name": "cat_file",
-        "description": "Reads a file from the project (must be in allowlist).",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "relative_path": {"type": "string", "description": "Path relative to project root (CWD)"}
-            },
-            "required": ["relative_path"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "list_files",
-        "description": "Lists contents of a directory in the project.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "relative_path": {"type": "string", "description": "Path relative to project root (CWD), default '.'"}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "name": "submit_final_spec",
-        "description": "Submits the final GemSpec.lean content for validation and build. Call this when you are ready to prove correctness.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": "The full content of the GemSpec.lean file"}
-            },
-            "required": ["content"]
-        }
-    }
+    _tool(
+        "read_source_file",
+        "Read content of a source file from the example project (relative to examples/<project>/).",
+        {"path": {"type": "string", "description": "Relative path in the example project"}},
+        ["path"],
+    ),
+    _tool(
+        "read_lean_file",
+        "Read content of a Lean file from the Spec project (relative to spec/Spec/).",
+        {"path": {"type": "string", "description": "Relative path in spec/Spec/ (e.g., 'order_engine/Engine.lean')"}},
+        ["path"],
+    ),
+    _tool(
+        "write_lean_file",
+        "Write or overwrite a Lean file in the Spec project (relative to spec/Spec/).",
+        {
+            "path": {"type": "string", "description": "Relative path in spec/Spec/ (e.g., 'order_engine/Engine.lean')"},
+            "content": {"type": "string", "description": "Full content of the file"},
+        },
+        ["path", "content"],
+    ),
+    _tool(
+        "verify_build",
+        "Run `lake build` in the spec/ directory to verify the Lean project builds.",
+        {},
+        [],
+    ),
+    _tool(
+        "submit_stage",
+        "Signal that the current stage is complete (only call this after the stage artifacts exist and build passes).",
+        {"summary": {"type": "string", "description": "Brief summary of work done"}},
+        ["summary"],
+    ),
 ]
 
-def map_function_calls(tool_calls):
-    calls = []
-    if tool_calls:
-        for tc in tool_calls:
-            calls.append({
-                "id": tc.id,
-                "name": tc.function.name,
-                "args": json.loads(tc.function.arguments)
-            })
-    return calls
+# ---------------- New Helpers for Targeted Repair ----------------
 
-def run_agent(project_root: Path = Path("."), rust_subdir: str = "TestProject"):
+LEAN_ERR_RE = re.compile(
+    r"^error:\s+(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+):\s+(?P<msg>.*)$",
+    re.MULTILINE
+)
+
+@dataclass
+class LeanError:
+    file: str
+    line: int
+    col: int
+    msg: str
+
+def parse_lean_errors(build_output: str, *, max_n: int = 5) -> list[LeanError]:
+    errs: list[LeanError] = []
+    for m in LEAN_ERR_RE.finditer(build_output):
+        errs.append(LeanError(
+            file=m.group("file").strip(),
+            line=int(m.group("line")),
+            col=int(m.group("col")),
+            msg=m.group("msg").strip(),
+        ))
+        if len(errs) >= max_n:
+            break
+    return errs
+
+def excerpt_around(text: str, line_1based: int, *, radius: int = 12) -> str:
+    lines = text.splitlines()
+    i = max(1, line_1based) - 1
+    lo = max(0, i - radius)
+    hi = min(len(lines), i + radius + 1)
+    out = []
+    for idx in range(lo, hi):
+        prefix = ">>" if idx == i else "  "
+        out.append(f"{prefix} {idx+1:4d}: {lines[idx]}")
+    return "\n".join(out)
+
+# Prelude and Import Policy
+PRELUDE_PATH = SPEC_SRC_DIR / "Prelude.lean"
+
+def ensure_prelude() -> None:
     """
-    Run the agent loop.
-    :param project_root: The root of the workspace (where main.py is assumed to run).
-    :param rust_subdir: Subdirectory containing the Rust project (e.g. 'src' or '.').
+    Centralize imports so the model doesn't guess non-existent modules.
     """
-    global ALLOWED_FILES, TEST_PROJECT_DIR, SPEC_DIR, GEMSPEC_PATH, PROGRAM_PATH
-    
-    # Update paths based on arguments
-    TEST_PROJECT_DIR = project_root / rust_subdir
-    SPEC_DIR = project_root / "spec"
-    GEMSPEC_PATH = SPEC_DIR / "Spec" / "Verif.lean"
-    PROGRAM_PATH = SPEC_DIR / "Spec" / "Program.lean"
-    
-    log(f"=== Boot (OpenAI Responses API) ===")
-    log(f"MODEL_ID: {MODEL_ID}")
-    log(f"Workspace Root: {project_root.resolve()}")
-    log(f"Rust Project: {TEST_PROJECT_DIR}")
-    log(f"Spec Dir: {SPEC_DIR}")
-    
-    ALLOWED_FILES = build_allowlist([TEST_PROJECT_DIR, SPEC_DIR])
-    
-    secrets = load_secrets()
-    api_key = secrets.get("secrets", {}).get("OPENAI_API_KEY")
-    if not api_key or api_key == "INSERT_YOUR_KEY_HERE":
-        log("Error: OPENAI_API_KEY missing in secrets.toml/env.")
-        return # Exit gracefully
-        
-    client = OpenAI(api_key=api_key)
-    
-    if PROGRAM_PATH.exists():
-        program_content = PROGRAM_PATH.read_text(encoding="utf-8")
-    else:
-        program_content = "Error: Program.lean not found."
-    
-    # Initialize Context
-    initial_prompt = f"""You are an expert formal verification engineer specializing in Lean 4.
-Your goal is to generate a valid Lean 4 specification file (`Verif.lean`) that formally checks the content in `Program.lean`.
+    if PRELUDE_PATH.exists():
+        return
+    content = (
+        "import Std\n\n"
+        "namespace Spec\n\n"
+        "-- Put shared defs/abbrevs here to avoid guessing Std module names.\n"
+        "abbrev U8  := UInt8\n"
+        "abbrev U16 := UInt16\n"
+        "abbrev U32 := UInt32\n"
+        "abbrev U64 := UInt64\n\n"
+        "end Spec\n"
+    )
+    _write_text_file(PRELUDE_PATH, content)
+    log(f"Wrote {PRELUDE_PATH}")
 
-Context:
-`Program.lean` content is located at `{PROGRAM_PATH.relative_to(project_root)}`.
-`Verif.lean` will be located at `{GEMSPEC_PATH.relative_to(project_root)}`.
+ALLOWED_IMPORT_PREFIXES = ["Std", "Spec", "Mathlib"]
+STRICT_ALLOWED_IMPORTS = {"Spec.Prelude", "Std"}
 
-`Program.lean` content:
-```lean
-{program_content}
-```
+IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z0-9_.]+)\s*$", re.MULTILINE)
 
-Instructions:
-1. Start by calling `list_files` (e.g., `list_files(".")`) to see the project root.
-2. Explore code using `cat_file`.
-3. Generate `Verif.lean` specifying the properties. 
-    - **CRITICAL PRINCIPLE**: Think critically about what the code *actually* does, not just the "happy path".
-    - Your specifications must be mathematically rigorous. they should capture the true behavior.
-    - If `Program.lean` contains functions with error modes (e.g. `Result`), account for them.
-    - Do NOT prove the theorems. Use `sorry` for all proofs.
-4. Call `submit_final_spec` to submit your work and verify.
-    - If it returns "Success", you are done. The loop will stop.
-    - If it returns build errors or submission failure (e.g. missing `sorry`), analyze them and retry by calling `submit_final_spec` again with fixed content.
-"""
-    
-    log("--- Starting Responses Loop ---")
-    current_input = initial_prompt
-    previous_response_id = None
-    
-    for turn in range(MAX_TURNS):
-        log(f"\n=== Turn {turn + 1} ===")
-        
+def validate_imports(content: str, *, strict: bool = True) -> tuple[bool, list[str]]:
+    mods = IMPORT_RE.findall(content)
+    bad: list[str] = []
+    for mod in mods:
+        if strict:
+            if mod not in STRICT_ALLOWED_IMPORTS and not mod.startswith("Spec."):
+                bad.append(mod)
+        else:
+            if not any(mod == p or mod.startswith(p + ".") for p in ALLOWED_IMPORT_PREFIXES):
+                bad.append(mod)
+    return (len(bad) == 0, bad)
+
+def run_lake_build_target(cwd: Path, target: str | None = None) -> str:
+    start = time.time()
+    cmd = ["lake", "build"]
+    if target:
+        cmd.append(target)
+    try:
+        res = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)
+        elapsed = time.time() - start
+        if res.returncode == 0:
+            return f"Build Success ({elapsed:.2f}s)"
+        return f"Build Failed (exit={res.returncode}, {elapsed:.2f}s):\n{res.stderr}\n{res.stdout}"
+    except Exception as e:
+        return f"Error running lake build: {e}"
+
+def module_name_from_lean_path(rel_path_under_spec: str) -> str | None:
+    p = Path(rel_path_under_spec)
+    if p.suffix != ".lean":
+        return None
+    return "Spec." + ".".join(p.with_suffix("").parts)
+
+# ---------------- Processor ----------------
+class ProjectProcessor:
+    def __init__(self, example_name: str, example_path: Path, client: OpenAI, secrets: dict):
+        self.name = example_name
+        self.source_root = example_path
+        self.spec_pkg_root = SPEC_DIR
+        self.spec_src_root = SPEC_SRC_DIR
+        self.spec_project_root = self.spec_src_root / example_name  # spec/Spec/<project>/
+        self.client = client
+        self.secrets = secrets
+
+        self.spec_project_root.mkdir(parents=True, exist_ok=True)
+
+    # ---- OpenAI helpers ----
+    def _responses_create(
+        self,
+        *,
+        instructions: str,
+        input_data: Any,
+        previous_response_id: Optional[str] = None,
+        tool_choice: Optional[Any] = None,
+        parallel_tool_calls: bool = False,
+    ):
+        kwargs: Dict[str, Any] = {
+            "model": MODEL_ID,
+            "instructions": instructions,
+            "input": input_data,
+            "tools": TOOLS_SCHEMA,
+            "parallel_tool_calls": parallel_tool_calls,
+        }
+        if previous_response_id:
+            kwargs["previous_response_id"] = previous_response_id
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        return self.client.responses.create(**kwargs)
+
+    def _execute_tool_call(self, item) -> Dict[str, Any]:
+        fname = item.name
+        call_id = item.call_id
         try:
-            # Responses API call
-            kwargs = {
-                "model": MODEL_ID,
-                "input": current_input,
-                "tools": TOOLS_SCHEMA,
-            }
-            if previous_response_id:
-                kwargs["previous_response_id"] = previous_response_id
-                
-            response = client.responses.create(**kwargs)
+            args = json.loads(item.arguments) if item.arguments else {}
+        except json.JSONDecodeError:
+            args = {}
+
+        log_args = dict(args)
+        if "content" in log_args and isinstance(log_args["content"], str):
+            log_args["content"] = f"<{len(log_args['content'])} chars>"
+        log(f"Call: {fname}({json.dumps(log_args)})")
+
+        out = ""
+        try:
+            if fname == "read_source_file":
+                rel = _safe_relpath(args["path"])
+                p = (self.source_root / rel)
+                if p.exists() and p.is_file():
+                    out = _read_text_file(p)
+                    if len(out) > MAX_TOOL_READ_CHARS:
+                        out = out[:MAX_TOOL_READ_CHARS] + f"\n\n-- TRUNCATED at {MAX_TOOL_READ_CHARS} chars --"
+                elif p.exists() and p.is_dir():
+                    out = f"Error: {rel} is a directory."
+                else:
+                    out = f"Error: File not found {rel}"
+
+            elif fname == "read_lean_file":
+                rel = _safe_relpath(args["path"])
+                p = (self.spec_src_root / rel)
+                if p.exists() and p.is_file():
+                    out = _read_text_file(p)
+                    if len(out) > MAX_TOOL_READ_CHARS:
+                        out = out[:MAX_TOOL_READ_CHARS] + f"\n\n-- TRUNCATED at {MAX_TOOL_READ_CHARS} chars --"
+                elif p.exists() and p.is_dir():
+                    out = f"Error: {rel} is a directory."
+                else:
+                    out = f"Error: Lean file not found {rel}"
+
+            elif fname == "write_lean_file":
+                rel = _safe_relpath(args["path"])
+                p = (self.spec_src_root / rel)
+                _write_text_file(p, args["content"])
+                out = f"Written to {p}"
+
+            elif fname == "verify_build":
+                out = run_lake_build(self.spec_pkg_root)
+
+            elif fname == "submit_stage":
+                out = f"Stage Submitted: {args.get('summary','')}"
+                log(out)
+
+            else:
+                out = f"Error: Unknown tool {fname}"
+
         except Exception as e:
-            log(f"OpenAI API Error: {e}")
-            break
+            out = f"Tool execution error for {fname}: {e}"
+
+        return {"type": "function_call_output", "call_id": call_id, "output": out}
+
+    def _tool_loop(
+        self,
+        *,
+        instructions: str,
+        initial_input: Any,
+        tool_choice: Optional[Any] = None,
+        max_turns: int = 20,
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Runs a tool-calling loop:
+        - Send initial_input
+        - Execute any function_call outputs
+        - Send function_call_output items back
+        Stops when:
+        - Model calls submit_stage
+        - Model emits no tool calls
+        Returns: (last_text, last_response_id)
+        """
+        previous_response_id: Optional[str] = None
+        current_input: Any = initial_input
+        last_text = ""
+
+        for turn in range(max_turns):
+            log(f"Turn {turn+1}")
+            resp = self._responses_create(
+                instructions=instructions,
+                input_data=current_input,
+                previous_response_id=previous_response_id,
+                tool_choice=tool_choice,
+                parallel_tool_calls=False,
+            )
+            previous_response_id = resp.id
+
+            tool_calls = []
+            saw_submit_stage = False
+
+            if getattr(resp, "output", None):
+                for item in resp.output:
+                    if item.type == "message":
+                        for part in item.content:
+                            if part.type == "output_text":
+                                last_text = part.text
+                                log(f"Model: {trunc(part.text)}")
+                    elif item.type == "function_call":
+                        if item.name == "submit_stage":
+                            saw_submit_stage = True
+                        tool_calls.append(item)
+
+            if not tool_calls:
+                log("No tool calls. Exiting loop.")
+                break
+
+            tool_outputs: List[Dict[str, Any]] = []
+            for call in tool_calls:
+                tool_outputs.append(self._execute_tool_call(call))
+
+            current_input = tool_outputs
+
+            if saw_submit_stage:
+                break
+
+        return last_text, previous_response_id
+
+    # ---- Pipeline pieces ----
+    def register_module(self) -> None:
+        """Ensure spec/Spec.lean imports Spec.<project>."""
+        spec_file = self.spec_src_root.parent / "Spec.lean"  # spec/Spec.lean
+        line = f"import Spec.{self.name}"
+        if spec_file.exists():
+            content = _read_text_file(spec_file)
+            if line not in content:
+                _write_text_file(spec_file, content.rstrip() + "\n" + line + "\n")
+        else:
+            _write_text_file(spec_file, line + "\n")
+
+    def _write_root_module(self, module_paths: List[str]) -> None:
+        """
+        Write spec/Spec/<project>.lean importing all generated submodules.
+        module_paths are relative to spec/Spec, like 'order_engine/Engine.lean'.
+        """
+        imports: List[str] = []
+        for rel in module_paths:
+            p = Path(rel)
+            if p.suffix != ".lean":
+                continue
+            # Convert path to module name: order_engine/Engine.lean -> Spec.order_engine.Engine
+            mod = "Spec." + ".".join(p.with_suffix("").parts)
+            imports.append(f"import {mod}")
+
+        root_rel = f"{self.name}.lean"
+        body = "\n".join(sorted(set(imports))) + "\n"
+        _write_text_file(self.spec_src_root / root_rel, body)
+        log(f"Wrote root module {self.spec_src_root / root_rel}")
+
+    def _translate_all_sources(self) -> None:
+        files = list_project_files(self.source_root)
+        src_files = [f for f in files if _is_source_file(f)]
+        if not src_files:
+            log("No C/C++ source files found; skipping translation.")
+            return
+
+        used_names: Dict[str, int] = {}
+        out_paths: List[str] = []
+
+        for rel in src_files:
+            src_path = self.source_root / rel
+            src_txt = _read_text_file(src_path)
+
+            out_rel = _lean_out_path_for_source(self.name, rel, used_names)
+            out_paths.append(out_rel)
+
+            instructions = (
+                "You are an Expert Polyglot outputting Lean 4.\n"
+                "You must produce a Lean module that typechecks.\n"
+                "Hard requirement: call write_lean_file exactly once with the provided output path.\n"
+                "At the top, write exactly: `import Spec.Prelude` and do not add other imports (unless purely Spec.*).\n"
+                "Do not call submit_stage.\n"
+                "Do not wrap code in fences.\n"
+                f"Namespace requirement: use `namespace Spec.{self.name}` (and end with `end Spec.{self.name}`).\n"
+            )
+            user_text = (
+                f"Translate this C/C++ source file into Lean 4.\n"
+                f"Project: {self.name}\n"
+                f"Source relative path: {rel}\n"
+                f"Output Lean file path (relative to spec/Spec/): {out_rel}\n\n"
+                "Source contents:\n"
+                + src_txt
+            )
+
+            log(f"Translating {rel} -> {out_rel}")
+            forced_write = {"type": "function", "name": "write_lean_file"}
+
+            # One-shot forced tool call: the model must emit write_lean_file
+            resp = self._responses_create(
+                instructions=instructions,
+                input_data=user_text,
+                previous_response_id=None,
+                tool_choice=forced_write,
+                parallel_tool_calls=False,
+            )
+
+            calls = [it for it in (resp.output or []) if it.type == "function_call"]
+            if not calls:
+                raise RuntimeError(f"Model did not call write_lean_file for {rel}. output_text={getattr(resp,'output_text', '')}")
+
+            for c in calls:
+                if c.name != "write_lean_file":
+                    # With forced function, this should not happen, but handle anyway.
+                    log(f"Warning: unexpected tool call {c.name} during forced write.")
+                _ = self._execute_tool_call(c)
+
+        # Root module + ensure Spec.lean imports it
+        self._write_root_module(out_paths)
+
+    def repair_until_build_targeted(self, label: str) -> None:
+        out = run_lake_build_target(self.spec_pkg_root, target=None)
+        if out.startswith("Build Success"):
+            log(f"{label}: build already passing.")
+            return
+
+        log(f"{label}: targeted repair loop starting.")
+        for step in range(MAX_REPAIR_TURNS):
+            errs = parse_lean_errors(out, max_n=1)
+            if not errs:
+                # If Lean didn't emit parseable errors, just show tail and use freeform repair
+                log("No parseable Lean errors; falling back to model-driven repair.")
+                self._repair_until_build_legacy(label, initial_out=out)
+                return
+
+            e = errs[0]
+
+            # We only handle errors in Spec/ files here
+            if not e.file.startswith("Spec/"):
+                log(f"Error not in Spec/: {e.file}. Falling back to freeform repair.")
+                self._repair_until_build_legacy(label, initial_out=out)
+                return
+
+            # Map "Spec/order_engine/Engine2.lean" -> "order_engine/Engine2.lean"
+            rel_under_spec = e.file[len("Spec/"):]
+            full_path = self.spec_src_root / rel_under_spec
+            if not full_path.exists():
+                log(f"File referenced by error not found: {full_path}. Falling back.")
+                self._repair_until_build_legacy(label, initial_out=out)
+                return
+
+            file_txt = _read_text_file(full_path)
+            snippet = excerpt_around(file_txt, e.line, radius=12)
+
+            # Strong nudge: forbid guessing imports + minimal change
+            instructions = (
+                "You are a Lean 4 build-fixer.\n"
+                "Fix EXACTLY the given error with minimal edits.\n"
+                "DO NOT invent imports. Prefer `import Spec.Prelude` only.\n"
+                "Do not refactor unrelated parts.\n"
+                "Hard requirement: you must call write_lean_file exactly once for the faulty file.\n"
+                "Return the FULL file content.\n"
+            )
+
+            user_text = (
+                f"Build error to fix:\n"
+                f"FILE: {e.file}\n"
+                f"LINE: {e.line}:{e.col}\n"
+                f"ERROR: {e.msg}\n\n"
+                f"File excerpt:\n{snippet}\n\n"
+                f"Rewrite the full file so it compiles, with minimal change.\n"
+                f"Path relative to spec/Spec/: {rel_under_spec}\n"
+            )
+
+            forced_write = {"type": "function", "name": "write_lean_file"}
+
+            resp = self._responses_create(
+                instructions=instructions,
+                input_data=user_text,
+                tool_choice=forced_write,
+                parallel_tool_calls=False,
+            )
+
+            calls = [it for it in (resp.output or []) if it.type == "function_call"]
+            if not calls:
+                raise RuntimeError("Model did not call write_lean_file in targeted repair.")
+
+            for c in calls:
+                self._execute_tool_call(c)
+
+            # Validate imports in the updated file
+            new_txt = _read_text_file(full_path)
+            ok, bad = validate_imports(new_txt, strict=True)
+            if not ok:
+                log(f"Import policy violation in {rel_under_spec}: {bad}")
+                # hard-fix: strip all imports and add Prelude only
+                lines = new_txt.splitlines()
+                # Remove lines starting with "import"
+                cleaned = [ln for ln in lines if not ln.strip().startswith("import ")]
+                new_txt2 = "import Spec.Prelude\n\n" + "\n".join(cleaned).lstrip()
+                _write_text_file(full_path, new_txt2)
+                log("Auto-sanitized imports to `import Spec.Prelude`.")
+
+            # Build just the failing module first (faster)
+            target_mod = module_name_from_lean_path(rel_under_spec)
+            out = run_lake_build_target(self.spec_pkg_root, target=target_mod)
+            log(f"Partial build {target_mod}: {trunc(out, 500)}")
             
-        previous_response_id = response.id
-        
-        # Parse output
-        has_tool_calls = False
-        tool_outputs = []
-        
-        if getattr(response, 'output', None):
-            for item in response.output:
-                if item.type == "message":
-                    # Item is ResponseOutputMessage
-                    for content_part in item.content:
-                        if content_part.type == "output_text":
-                            log(f"Model: {content_part.text}")
-                
-                elif item.type == "function_call":
-                    # Item is ResponseFunctionToolCall
-                    has_tool_calls = True
-                    func_name = item.name
-                    call_id = item.call_id
-                    args_str = item.arguments
-                    
-                    try:
-                        args = json.loads(args_str)
-                    except json.JSONDecodeError:
-                        args = {}
-                    
-                    log(f"Tool Call: {func_name}({trunc(str(args), 100)})")
-                    
-                    result_str = "Error: Unknown tool"
-                    if func_name == "cat_file":
-                        result_str = cat_file(**args)
-                    elif func_name == "list_files":
-                        result_str = list_files(**args)
-                    elif func_name == "submit_final_spec":
-                        result_str = submit_final_spec(**args)
-                    
-                    log(f"Tool Output: {trunc(result_str, 500)}")
-                    
-                    if func_name == "submit_final_spec" and result_str.strip() == "Success":
-                         log("!!! SUCCESS VERIFIED !!!")
-                         
-                         # --- Aristotle Integration ---
-                         aristotle_key = secrets.get("secrets", {}).get("ARISTOTLE_API_KEY")
-                         if not aristotle_key or "INSERT" in aristotle_key:
-                             log("Warning: ARISTOTLE_API_KEY not configured. Skipping automated proving.")
-                             return
+            if out.startswith("Build Success"):
+                # verify full build
+                out2 = run_lake_build_target(self.spec_pkg_root, target=None)
+                if out2.startswith("Build Success"):
+                    log(f"{label}: build fully repaired.")
+                    return
+                out = out2
 
-                         if not aristotlelib:
-                             log("Warning: aristotlelib not installed. Skipping automated proving.")
-                             return
+        log(f"{label}: repair loop exhausted; still failing.")
 
-                         log("=== Calling Aristotle (Vibe Proving) ===")
-                         os.environ["ARISTOTLE_API_KEY"] = aristotle_key
-                         
-                         try:
-                             # Using prove_from_file with auto_add_imports=True (built-in way to handle context)
-                             # validate_lean_project=True ensures checking the project structure
-                             log(f"Submitting {GEMSPEC_PATH} to Aristotle...")
-                             
-                             # Note: prove_from_file returns the path to the solution OR project_id if async.
-                             # Default is wait_for_completion=True.
-                             # Change CWD to spec dir so aristotlelib/lake can resolve relative paths
-                             original_cwd = os.getcwd()
-                             os.chdir(SPEC_DIR)
-                             log(f"Changed CWD to {SPEC_DIR} for Aristotle call")
-                             
-                             try:
-                                 # It is an async function, so we must run it in an event loop.
-                                 # Note: input_file_path should be relative to the new CWD or absolute. 
-                                 # GEMSPEC_PATH is relative to root (spec/Spec/GemSpec.lean).
-                                 # We are in spec/, so we want Spec/GemSpec.lean.
-                                 target_file = GEMSPEC_PATH.relative_to(SPEC_DIR)
-                                 
-                                 result = asyncio.run(aristotlelib.Project.prove_from_file(
-                                     input_file_path=str(target_file),
-                                     auto_add_imports=True,
-                                     validate_lean_project=True,
-                                     wait_for_completion=True
-                                 ))
-                             finally:
-                                 os.chdir(original_cwd)
-                                 log(f"Restored CWD to {original_cwd}")
-                             
-                             log(f"Aristotle Proof Complete. Result saved to: {result}")
-                             
-                             # If result is a path, let's copy/rename it to GemSpec.lean to become the canonical source
-                             # Result is relative to SPEC_DIR because we ran it there
-                             result_path = SPEC_DIR / result
-                             if result_path.exists():
-                                 # Backup original just in case (optional, but polite)
-                                 # GEMSPEC_PATH.rename(GEMSPEC_PATH.with_suffix(".lean.bak"))
-                                 
-                                 # Overwrite
-                                 result_path.rename(GEMSPEC_PATH)
-                                 log(f"Final proved spec saved to: {GEMSPEC_PATH} (overwriting original)")
+    def _repair_until_build_legacy(self, label: str, initial_out: str | None = None) -> None:
+        """
+        Legacy loop: freeform repair if we can't parse errors.
+        """
+        res = initial_out or run_lake_build(self.spec_pkg_root)
+        if res.startswith("Build Success"):
+            return
 
-                                 # Run final verification build
-                                 log("Running final `lake build` to verify proved spec...")
-                                 build_res = subprocess.run(
-                                     ["lake", "build"],
-                                     cwd=str(SPEC_DIR),
-                                     capture_output=True,
-                                     text=True,
-                                     check=False
-                                 )
-                                 if build_res.returncode == 0:
-                                     log("!!! FINAL BUILD SUCCESSFUL !!!")
-                                 else:
-                                     log(f"Warning: Final build failed (exit={build_res.returncode}). Check GemSpec.lean manually.")
-                                     log(f"STDERR: {build_res.stderr}")
-                             
-                         except Exception as ari_err:
-                             log(f"Aristotle Error: {ari_err}")
-                             # We don't fail the whole agent run, as spec generation was successful.
-                         
-                         return
+        log(f"{label}: entering legacy repair")
+        log(trunc(res, 4000))
 
-                    # Construct proper tool output item for next input
-                    tool_outputs.append({
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": result_str
-                    })
+        allowed = {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [
+                {"type": "function", "name": "read_lean_file"},
+                {"type": "function", "name": "write_lean_file"},
+                {"type": "function", "name": "verify_build"},
+            ],
+        }
 
-        if not has_tool_calls:
-            log("No tool calls. Checking for done signal...")
-            # If no tools called, checking if we are done or just chatting.
-            # In this autonomous loop, we generally stop if no tools are used
-            # unless we interpret the text as completion.
-            # But usually we loop until test_gemspec returns success.
-            log("Stalled? Stopping.")
-            break
-            
-        # Update current_input for the next turn
-        current_input = tool_outputs
+        instructions = (
+            "You are a Lean 4 build-fixer.\n"
+            "Goal: make `lake build` succeed.\n"
+            "Use read_lean_file/write_lean_file/verify_build.\n"
+            "Do not invent new dependencies.\n"
+        )
+        initial_input = (
+            f"Build Failed:\n{res}\n\n"
+            f"Files:\n" + "\n".join(list_lean_files(self.spec_src_root))
+        )
 
-def main():
-    run_agent()
+        _, _ = self._tool_loop(
+            instructions=instructions,
+            initial_input=initial_input,
+            tool_choice=allowed,
+            max_turns=10,
+        )
+
+    def run_stage_translation(self) -> None:
+        log("--- Stage: Translation ---")
+        self._translate_all_sources()
+        self.repair_until_build_targeted("Translation")
+
+    def run_stage_equivalence(self) -> None:
+        log("--- Stage: Equivalence ---")
+
+        # Provide the model enough context to write tests, then FORCE it to write Test.lean.
+        lean_files = list_lean_files(self.spec_src_root)
+        project_files = [p for p in lean_files if p.startswith(f"{self.name}/")]
+        key_files = project_files[:8]  # cap context
+
+        snippets: List[str] = []
+        for rel in key_files:
+            p = self.spec_src_root / rel
+            try:
+                txt = _read_text_file(p)
+            except Exception:
+                txt = ""
+            snippets.append(f"FILE: {rel}\n{txt}\n")
+
+        instructions = (
+            "You are a QA Engineer for Lean 4.\n"
+            "Create a Lean test module that adds executable-style constraints via `example` or small theorems.\n"
+            "Hard requirement: call write_lean_file exactly once to write the requested Test.lean file.\n"
+            "Use `import Spec.Prelude` and `import Spec.<Project>...`.\n"
+            "The test file must compile.\n"
+            "Do not call submit_stage.\n"
+        )
+        out_rel = f"{self.name}/Test.lean"
+        user_text = (
+            f"Project: {self.name}\n"
+            f"Write tests to: {out_rel}\n\n"
+            "Existing translated Lean files:\n" + "\n".join(project_files) + "\n\n"
+            "Here are contents of some key files:\n\n" + "\n\n".join(snippets)
+        )
+
+        forced_write = {"type": "function", "name": "write_lean_file"}
+        resp = self._responses_create(
+            instructions=instructions,
+            input_data=user_text,
+            tool_choice=forced_write,
+            parallel_tool_calls=False,
+        )
+        calls = [it for it in (resp.output or []) if it.type == "function_call"]
+        if not calls:
+            raise RuntimeError("Model did not call write_lean_file for Test.lean")
+        for c in calls:
+            _ = self._execute_tool_call(c)
+
+        self.repair_until_build_targeted("Equivalence")
+
+    def run_stage_specification(self) -> None:
+        log("--- Stage: Specification ---")
+
+        lean_files = list_lean_files(self.spec_src_root)
+        project_files = [p for p in lean_files if p.startswith(f"{self.name}/")]
+
+        snippets: List[str] = []
+        for rel in project_files[:8]:
+            p = self.spec_src_root / rel
+            try:
+                txt = _read_text_file(p)
+            except Exception:
+                txt = ""
+            snippets.append(f"FILE: {rel}\n{txt}\n")
+
+        instructions = (
+            "You are a Formal Verification Engineer for Lean 4.\n"
+            "Create a Verif.lean file that states intended invariants and theorems.\n"
+            "It is allowed to use `sorry` for proofs, but the file must parse and typecheck.\n"
+            "Hard requirement: call write_lean_file exactly once to write the requested Verif.lean file.\n"
+            "Use `import Spec.Prelude`.\n"
+            "Do not call submit_stage.\n"
+        )
+        out_rel = f"{self.name}/Verif.lean"
+        user_text = (
+            f"Project: {self.name}\n"
+            f"Write specification to: {out_rel}\n\n"
+            "Existing translated Lean files:\n" + "\n".join(project_files) + "\n\n"
+            "Here are contents of some key files:\n\n" + "\n\n".join(snippets)
+        )
+
+        forced_write = {"type": "function", "name": "write_lean_file"}
+        resp = self._responses_create(
+            instructions=instructions,
+            input_data=user_text,
+            tool_choice=forced_write,
+            parallel_tool_calls=False,
+        )
+        calls = [it for it in (resp.output or []) if it.type == "function_call"]
+        if not calls:
+            raise RuntimeError("Model did not call write_lean_file for Verif.lean")
+        for c in calls:
+            _ = self._execute_tool_call(c)
+
+        self.repair_until_build_targeted("Specification")
+
+    def run_stage_verification(self) -> None:
+        target_file = self.spec_project_root / "Verif.lean"
+        if not target_file.exists():
+            log("No Verif.lean found. Skipping Aristotle.")
+            return
+        if not aristotlelib:
+            log("aristotlelib missing. Skipping Aristotle.")
+            return
+
+        log("=== Aristotle Verification ===")
+        os.environ["ARISTOTLE_API_KEY"] = self.secrets["secrets"].get("ARISTOTLE_API_KEY", "")
+
+        try:
+            cwd = os.getcwd()
+            os.chdir(self.spec_pkg_root)
+
+            rel_target = target_file.relative_to(self.spec_pkg_root)
+            log(f"Submitting {rel_target} to Aristotle...")
+
+            result = asyncio.run(
+                aristotlelib.Project.prove_from_file(
+                    input_file_path=str(rel_target),
+                    auto_add_imports=True,
+                    validate_lean_project=True,
+                    wait_for_completion=True,
+                )
+            )
+
+            os.chdir(cwd)
+            log(f"Aristotle Output: {result}")
+
+            res_path = self.spec_pkg_root / result
+            if res_path.exists():
+                res_path.rename(target_file)
+                log("Verified spec saved over Verif.lean.")
+                bres = run_lake_build(self.spec_pkg_root)
+                log(f"Final Build: {bres}")
+
+        except Exception as e:
+            log(f"Aristotle Error: {e}")
+            os.chdir(cwd)
+
+    # ---- Main runner ----
+    def run(self) -> None:
+        log(f"=== Processing Project: {self.name} ===")
+        ensure_prelude()
+        self.register_module()
+
+        self.run_stage_translation()
+        self.run_stage_equivalence()
+        self.run_stage_specification()
+        self.run_stage_verification()
+
+
+# ---------------- Main ----------------
+def main() -> None:
+    log("=== Anneal Universal Verification Agent ===")
+    secrets = load_secrets()
+    client = OpenAI(api_key=secrets["secrets"]["OPENAI_API_KEY"])
+
+    if not EXAMPLES_DIR.exists():
+        log(f"No examples found in {EXAMPLES_DIR}")
+        return
+
+    examples = [d for d in EXAMPLES_DIR.iterdir() if d.is_dir()]
+    if not examples:
+        log("No examples found.")
+        return
+
+    for ex in examples:
+        proc = ProjectProcessor(ex.name, ex, client, secrets)
+        proc.run()
+
 
 if __name__ == "__main__":
     main()
