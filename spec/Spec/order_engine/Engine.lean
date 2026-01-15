@@ -2,355 +2,434 @@ import Spec.Prelude
 
 namespace Spec.order_engine
 
-/-!
-Translation of `examples/order_engine/engine.c`.
+open Spec
 
-The original C implementation is a single-instrument limit order book engine using:
-* BSTs for price levels (bids: max on right, asks: min on left)
-* FIFO queues at each level (doubly-linked list)
-* fixed-size pools with free-list stacks for allocation (no malloc)
+/-
+Direct Lean translation of `engine.c`.
 
-In Lean we model the same observable behavior as a pure state machine.
-We replace pointers with stable pool indices (`Nat`), and make allocation explicit
-via free-list stacks.
+We model C pointers into fixed-size pools as `Nat` indices into arrays.
+A "null pointer" is represented by `none`.
 
-This file intentionally focuses on the executable semantics used by `main.c`:
-`init_engine`, `submit_order`, `match_orders`.
-Printing is modeled by accumulating log lines (rather than IO).
+Faithfulness points:
+* `alloc_order` does not clear/reset the order contents (C does not `memset`).
+* `alloc_level` *does* clear/reset the level contents (C does `memset`).
+* `free_order` / `free_level` do not check for double free (C does not).
+* BST helpers and best-price selection follow C control flow.
+* `match_orders` produces deterministic log lines corresponding to C `printf`.
 -/
 
-abbrev Price := Nat
-abbrev Qty := Nat
-abbrev OrderUserId := Nat
+-- -----------------------------
+-- Constants (pool sizes)
+-- -----------------------------
+
+def MAX_ORDERS : Nat := 1024
+
+def MAX_LEVELS : Nat := 256
+
+-- -----------------------------
+-- Basic types
+-- -----------------------------
 
 inductive Side where
-  | buy
-  | sell
-  deriving BEq, DecidableEq, Repr
+  | SIDE_BUY
+  | SIDE_SELL
+  deriving BEq, Repr, DecidableEq
 
 structure Order where
-  id : OrderUserId
-  price : Price
-  quantity : Qty
-  side : Side
+  id       : U32 := 0
+  price    : U32 := 0
+  quantity : U32 := 0
+  side     : Side := Side.SIDE_BUY
+  next     : Option Nat := none
+  prev     : Option Nat := none
   deriving Repr
 
-/-- A price level stores FIFO queue of resting order pool indices. -/
 structure Level where
-  price : Price
-  orders : List Nat
-  left : Option Nat
-  right : Option Nat
+  price       : U32 := 0
+  orders_head : Option Nat := none
+  orders_tail : Option Nat := none
+  left        : Option Nat := none
+  right       : Option Nat := none
   deriving Repr
 
 structure OrderBook where
-  buy_levels : Option Nat
-  sell_levels : Option Nat
+  buy_levels  : Option Nat := none
+  sell_levels : Option Nat := none
   deriving Repr
 
 structure Engine where
-  /-- Order pool: index -> current order if allocated. -/
-  orders : Array (Option Order)
-  /-- Level pool: index -> current level if allocated. -/
-  levels : Array (Option Level)
-  /-- Free list stacks (top at head). -/
-  freeOrders : List Nat
-  freeLevels : List Nat
+  order_pool : Array Order
+  level_pool : Array Level
+  free_orders : Array (Option Nat)
+  free_orders_count : Nat
+  free_levels : Array (Option Nat)
+  free_levels_count : Nat
   book : OrderBook
-  /-- Log of matches (in place of `printf`). -/
-  log : List String
   deriving Repr
 
-namespace Engine
+-- -----------------------------
+-- Helpers for fixed-size arrays
+-- -----------------------------
 
-/-- Constants from the C header. -/
-def MAX_ORDERS : Nat := 1024
-/-- Constants from the C header. -/
-def MAX_LEVELS : Nat := 256
+private def mkArrayReplicate {α : Type} (n : Nat) (a : α) : Array α :=
+  Array.mk (List.replicate n a)
 
-private def mkFreeList (n : Nat) : List Nat :=
-  (List.range n).reverse
+private def arrayGetD {α} (arr : Array α) (i : Nat) (d : α) : α :=
+  -- `arr[i]!` requires an `Inhabited α` instance; we avoid that requirement
+  -- by using `get?` which returns an `Option`.
+  match arr.get? i with
+  | some v => v
+  | none => d
 
-/-- `memset(engine,0,...)` + free-list initialization. -/
-def init : Engine :=
-  { orders := Array.mkArray MAX_ORDERS none
-    levels := Array.mkArray MAX_LEVELS none
-    freeOrders := mkFreeList MAX_ORDERS
-    freeLevels := mkFreeList MAX_LEVELS
-    book := { buy_levels := none, sell_levels := none }
-    log := [] }
+/-- Total array set: out-of-bounds writes are ignored.
 
-/-- Pop an order index from the free-list. -/
-def allocOrder (e : Engine) : (Engine × Option Nat) :=
-  match e.freeOrders with
-  | [] => (e, none)
-  | i :: is => ({ e with freeOrders := is }, some i)
+In C, out-of-bounds would be UB; here we keep the state unchanged.
+-/
+private def arraySetSafe {α} (arr : Array α) (i : Nat) (v : α) : Array α :=
+  if i < arr.size then arr.set! i v else arr
 
-/-- Push an order index back onto the free-list. (No double-free checks.) -/
-def freeOrder (e : Engine) (i : Nat) : Engine :=
-  if e.freeOrders.length < MAX_ORDERS then
-    { e with
-      orders := e.orders.set! i none
-      freeOrders := i :: e.freeOrders }
+/-- Build a size-`n` array by mapping over `0..n-1`. -/
+private def arrayOfFn {α : Type} (n : Nat) (f : Nat → α) : Array α :=
+  Array.mk ((List.range n).map f)
+
+-- -----------------------------
+-- Engine initialization
+-- -----------------------------
+
+/-- Create an initialized engine state corresponding to C `init_engine`. -/
+def init_engine : Engine :=
+  let order_pool := mkArrayReplicate MAX_ORDERS {}
+  let level_pool := mkArrayReplicate MAX_LEVELS {}
+  let free_orders := arrayOfFn MAX_ORDERS (fun i => some i)
+  let free_levels := arrayOfFn MAX_LEVELS (fun i => some i)
+  {
+    order_pool := order_pool
+    level_pool := level_pool
+    free_orders := free_orders
+    free_orders_count := MAX_ORDERS
+    free_levels := free_levels
+    free_levels_count := MAX_LEVELS
+    book := {}
+  }
+
+-- -----------------------------
+-- Memory management
+-- -----------------------------
+
+/-- Pop from free order stack. Returns `(engine', ptr?)`. -/
+def alloc_order (e : Engine) : Engine × Option Nat :=
+  if 0 < e.free_orders_count then
+    let newCount := e.free_orders_count - 1
+    let idxOpt := arrayGetD e.free_orders newCount none
+    let e := { e with free_orders_count := newCount }
+    (e, idxOpt)
+  else
+    (e, none)
+
+/-- Push onto free order stack if not full.
+
+No double-free protection, mirroring the C behavior.
+-/
+def free_order (e : Engine) (orderIdx : Nat) : Engine :=
+  if e.free_orders_count < MAX_ORDERS then
+    let e := { e with free_orders := arraySetSafe e.free_orders e.free_orders_count (some orderIdx) }
+    { e with free_orders_count := e.free_orders_count + 1 }
   else
     e
 
-/-- Pop a level index from the free-list; the allocated level is reset/cleared. -/
-def allocLevel (e : Engine) : (Engine × Option Nat) :=
-  match e.freeLevels with
-  | [] => (e, none)
-  | i :: is =>
-      let e' := { e with
-        freeLevels := is
-        levels := e.levels.set! i (some { price := 0, orders := [], left := none, right := none }) }
-      (e', some i)
+/-- Pop from free level stack and zero the level (C `memset(l,0,sizeof(Level))`). -/
+def alloc_level (e : Engine) : Engine × Option Nat :=
+  if 0 < e.free_levels_count then
+    let newCount := e.free_levels_count - 1
+    let idxOpt := arrayGetD e.free_levels newCount none
+    let e := { e with free_levels_count := newCount }
+    match idxOpt with
+    | none => (e, none)
+    | some li =>
+      let e := { e with level_pool := arraySetSafe e.level_pool li {} }
+      (e, some li)
+  else
+    (e, none)
 
-/-- Push a level index back onto the free-list. -/
-def freeLevel (e : Engine) (i : Nat) : Engine :=
-  if e.freeLevels.length < MAX_LEVELS then
-    { e with
-      levels := e.levels.set! i none
-      freeLevels := i :: e.freeLevels }
+/-- Push onto free level stack if not full. -/
+def free_level (e : Engine) (levelIdx : Nat) : Engine :=
+  if e.free_levels_count < MAX_LEVELS then
+    let e := { e with free_levels := arraySetSafe e.free_levels e.free_levels_count (some levelIdx) }
+    { e with free_levels_count := e.free_levels_count + 1 }
   else
     e
 
-private def getLevel? (e : Engine) (i : Nat) : Option Level :=
-  e.levels.get! i
+-- -----------------------------
+-- Pool accessors
+-- -----------------------------
+
+private def getOrder (e : Engine) (i : Nat) : Order :=
+  arrayGetD e.order_pool i {}
+
+private def setOrder (e : Engine) (i : Nat) (o : Order) : Engine :=
+  { e with order_pool := arraySetSafe e.order_pool i o }
+
+private def getLevel (e : Engine) (i : Nat) : Level :=
+  arrayGetD e.level_pool i {}
 
 private def setLevel (e : Engine) (i : Nat) (l : Level) : Engine :=
-  { e with levels := e.levels.set! i (some l) }
+  { e with level_pool := arraySetSafe e.level_pool i l }
 
-/-- BST lookup (`find_level`).
+-- -----------------------------
+-- BST helpers
+-- -----------------------------
 
-We implement this using `partial` recursion because the BST is represented via
-pool indices without a structural recursion measure available to Lean.
+/-- Recursive BST search by price (C `find_level`). -/
+partial def find_level (e : Engine) (root : Option Nat) (price : U32) : Option Nat :=
+  match root with
+  | none => none
+  | some ri =>
+    let r := getLevel e ri
+    if price == r.price then
+      some ri
+    else if price < r.price then
+      find_level e r.left price
+    else
+      find_level e r.right price
+
+/-- Internal BST insertion that updates a given root location using `setRoot`.
+
+Mirrors C `insert_level` (recursive with `Level**`).
 -/
-partial def findLevel (e : Engine) (root : Option Nat) (price : Price) : Option Nat :=
-  let rec go (r : Option Nat) : Option Nat :=
-    match r with
+private partial def insert_level_at
+    (e : Engine)
+    (root : Option Nat)
+    (setRoot : Option Nat → Engine → Engine)
+    (price : U32) : Engine × Option Nat :=
+  match root with
+  | none =>
+    let (e, li?) := alloc_level e
+    match li? with
+    | none => (e, none)
+    | some li =>
+      let l := { (getLevel e li) with price := price }
+      let e := setLevel e li l
+      let e := setRoot (some li) e
+      (e, some li)
+  | some ri =>
+    let r := getLevel e ri
+    if price == r.price then
+      (e, some ri)
+    else if price < r.price then
+      let (e, child?) :=
+        insert_level_at e r.left
+          (fun v e =>
+            let r' := { (getLevel e ri) with left := v }
+            setLevel e ri r')
+          price
+      (e, child?)
+    else
+      let (e, child?) :=
+        insert_level_at e r.right
+          (fun v e =>
+            let r' := { (getLevel e ri) with right := v }
+            setLevel e ri r')
+          price
+      (e, child?)
+
+/-- Insert/find a level in the correct side tree (C `insert_level`). -/
+def insert_level (e : Engine) (side : Side) (price : U32) : Engine × Option Nat :=
+  match side with
+  | Side.SIDE_BUY =>
+    insert_level_at e e.book.buy_levels
+      (fun v e => { e with book := { e.book with buy_levels := v } })
+      price
+  | Side.SIDE_SELL =>
+    insert_level_at e e.book.sell_levels
+      (fun v e => { e with book := { e.book with sell_levels := v } })
+      price
+
+/-- Best buy is highest price => rightmost (C `get_best_buy`). -/
+partial def get_best_buy (e : Engine) (root : Option Nat) : Option Nat :=
+  let rec loop (cur : Option Nat) : Option Nat :=
+    match cur with
     | none => none
     | some i =>
-        match getLevel? e i with
-        | none => none
-        | some l =>
-            if price == l.price then some i
-            else if price < l.price then go l.left
-            else go l.right
-  go root
+      let l := getLevel e i
+      match l.right with
+      | none => some i
+      | some _ => loop l.right
+  loop root
 
-/-- BST insert (`insert_level`). Returns updated engine + new root + resulting level index (or none on OOM).
+/-- Best sell is lowest price => leftmost (C `get_best_sell`). -/
+partial def get_best_sell (e : Engine) (root : Option Nat) : Option Nat :=
+  let rec loop (cur : Option Nat) : Option Nat :=
+    match cur with
+    | none => none
+    | some i =>
+      let l := getLevel e i
+      match l.left with
+      | none => some i
+      | some _ => loop l.left
+  loop root
 
-Marked `partial` for the same reason as `findLevel`.
+/-- Remove max node from BST (best buy). Returns `(engine', newRoot)`.
+
+Mirrors C `remove_best_buy_node`.
 -/
-partial def insertLevel (e : Engine) (root : Option Nat) (price : Price) : (Engine × Option Nat × Option Nat) :=
-  let rec go (e : Engine) (r : Option Nat) : (Engine × Option Nat × Option Nat) :=
-    match r with
-    | none =>
-        let (e1, oi) := allocLevel e
-        match oi with
-        | none => (e1, none, none)
-        | some i =>
-            let l := { price := price, orders := [], left := none, right := none }
-            let e2 := setLevel e1 i l
-            (e2, some i, some i)
-    | some i =>
-        match getLevel? e i with
-        | none => (e, none, some i)
-        | some l =>
-            if price == l.price then
-              (e, some i, some i)
-            else if price < l.price then
-              let (e', newLeft, res) := go e l.left
-              let l' := { l with left := newLeft }
-              (setLevel e' i l', some i, res)
-            else
-              let (e', newRight, res) := go e l.right
-              let l' := { l with right := newRight }
-              (setLevel e' i l', some i, res)
-  go e root
-
-/-- Rightmost node (`get_best_buy`). -/
-partial def getBestBuy (e : Engine) (root : Option Nat) : Option Nat :=
-  let rec go (r : Option Nat) : Option Nat :=
-    match r with
-    | none => none
-    | some i =>
-        match getLevel? e i with
-        | none => some i
-        | some l =>
-            match l.right with
-            | none => some i
-            | some _ => go l.right
-  go root
-
-/-- Leftmost node (`get_best_sell`). -/
-partial def getBestSell (e : Engine) (root : Option Nat) : Option Nat :=
-  let rec go (r : Option Nat) : Option Nat :=
-    match r with
-    | none => none
-    | some i =>
-        match getLevel? e i with
-        | none => some i
-        | some l =>
-            match l.left with
-            | none => some i
-            | some _ => go l.left
-  go root
-
-/-- Remove max node (best buy) from BST (`remove_best_buy_node`). -/
-partial def removeBestBuyNode (e : Engine) (root : Option Nat) : (Engine × Option Nat) :=
-  let rec go (e : Engine) (r : Option Nat) : (Engine × Option Nat) :=
-    match r with
-    | none => (e, none)
-    | some i =>
-        match getLevel? e i with
-        | none => (e, none)
-        | some l =>
-            match l.right with
-            | some _ =>
-                let (e', newRight) := go e l.right
-                let l' := { l with right := newRight }
-                (setLevel e' i l', some i)
-            | none =>
-                -- this is max; replace by left
-                let e' := freeLevel e i
-                (e', l.left)
-  go e root
-
-/-- Remove min node (best sell) from BST (`remove_best_sell_node`). -/
-partial def removeBestSellNode (e : Engine) (root : Option Nat) : (Engine × Option Nat) :=
-  let rec go (e : Engine) (r : Option Nat) : (Engine × Option Nat) :=
-    match r with
-    | none => (e, none)
-    | some i =>
-        match getLevel? e i with
-        | none => (e, none)
-        | some l =>
-            match l.left with
-            | some _ =>
-                let (e', newLeft) := go e l.left
-                let l' := { l with left := newLeft }
-                (setLevel e' i l', some i)
-            | none =>
-                let e' := freeLevel e i
-                (e', l.right)
-  go e root
-
-/-- Enqueue at tail (FIFO). -/
-def enqueueOrderAtLevel (e : Engine) (lvlIdx : Nat) (ordIdx : Nat) : Engine :=
-  match getLevel? e lvlIdx with
-  | none => e
-  | some l =>
-      setLevel e lvlIdx { l with orders := l.orders ++ [ordIdx] }
-
-/-- Dequeue from head (FIFO). -/
-def dequeueOrderAtLevel (e : Engine) (lvlIdx : Nat) : (Engine × Option Nat) :=
-  match getLevel? e lvlIdx with
+private partial def remove_best_buy_node_at (e : Engine) (root : Option Nat) : Engine × Option Nat :=
+  match root with
   | none => (e, none)
-  | some l =>
-      match l.orders with
-      | [] => (e, none)
-      | o :: os =>
-          let e' := setLevel e lvlIdx { l with orders := os }
-          (e', some o)
+  | some ri =>
+    let r := getLevel e ri
+    match r.right with
+    | some rR =>
+      let (e, newRight) := remove_best_buy_node_at e (some rR)
+      let r' := { (getLevel e ri) with right := newRight }
+      (setLevel e ri r', some ri)
+    | none =>
+      let e := free_level e ri
+      (e, r.left)
 
-/-- C `submit_order`. Drops the order on OOM. -/
-def submitOrder (e : Engine) (id : OrderUserId) (price : Price) (quantity : Qty) (side : Side) : Engine :=
-  let (e1, oi?) := allocOrder e
-  match oi? with
-  | none => e1
+/-- Remove min node from BST (best sell). Returns `(engine', newRoot)`.
+
+Mirrors C `remove_best_sell_node`.
+-/
+private partial def remove_best_sell_node_at (e : Engine) (root : Option Nat) : Engine × Option Nat :=
+  match root with
+  | none => (e, none)
+  | some ri =>
+    let r := getLevel e ri
+    match r.left with
+    | some rL =>
+      let (e, newLeft) := remove_best_sell_node_at e (some rL)
+      let r' := { (getLevel e ri) with left := newLeft }
+      (setLevel e ri r', some ri)
+    | none =>
+      let e := free_level e ri
+      (e, r.right)
+
+/-- Remove best buy level from engine book. -/
+def remove_best_buy_node (e : Engine) : Engine :=
+  let (e, newRoot) := remove_best_buy_node_at e e.book.buy_levels
+  { e with book := { e.book with buy_levels := newRoot } }
+
+/-- Remove best sell level from engine book. -/
+def remove_best_sell_node (e : Engine) : Engine :=
+  let (e, newRoot) := remove_best_sell_node_at e e.book.sell_levels
+  { e with book := { e.book with sell_levels := newRoot } }
+
+-- -----------------------------
+-- Queue helpers
+-- -----------------------------
+
+/-- Enqueue order at tail (FIFO), updating DLL links (C `enqueue_order`). -/
+def enqueue_order (e : Engine) (levelIdx : Nat) (orderIdx : Nat) : Engine :=
+  let lvl := getLevel e levelIdx
+  let o := getOrder e orderIdx
+  let o := { o with next := none, prev := lvl.orders_tail }
+  let e := setOrder e orderIdx o
+  match lvl.orders_tail with
+  | some tailIdx =>
+    let tail := getOrder e tailIdx
+    let tail := { tail with next := some orderIdx }
+    let e := setOrder e tailIdx tail
+    let lvl := { (getLevel e levelIdx) with orders_tail := some orderIdx }
+    setLevel e levelIdx lvl
+  | none =>
+    let lvl := { lvl with orders_head := some orderIdx, orders_tail := some orderIdx }
+    setLevel e levelIdx lvl
+
+/-- Dequeue from head, updating DLL links (C `dequeue_order`).
+
+Returns `(engine', orderIdx?)`.
+-/
+def dequeue_order (e : Engine) (levelIdx : Nat) : Engine × Option Nat :=
+  let lvl := getLevel e levelIdx
+  match lvl.orders_head with
+  | none => (e, none)
   | some oi =>
-      let o : Order := { id := id, price := price, quantity := quantity, side := side }
-      let e2 := { e1 with orders := e1.orders.set! oi (some o) }
-      let root := match side with | .buy => e2.book.buy_levels | .sell => e2.book.sell_levels
-      let (e3, newRoot?, lvlIdx?) := insertLevel e2 root price
-      match lvlIdx? with
+    let o := getOrder e oi
+    let newHead := o.next
+    let e := setLevel e levelIdx { lvl with orders_head := newHead }
+    let e :=
+      match newHead with
+      | some nhi =>
+        let nh := getOrder e nhi
+        setOrder e nhi { nh with prev := none }
       | none =>
-          -- failed to get level; return order to free list
-          freeOrder e3 oi
-      | some li =>
-          let book' :=
-            match side with
-            | .buy => { e3.book with buy_levels := newRoot? }
-            | .sell => { e3.book with sell_levels := newRoot? }
-          let e4 := { e3 with book := book' }
-          enqueueOrderAtLevel e4 li oi
+        setLevel e levelIdx { (getLevel e levelIdx) with orders_tail := none }
+    let o' := { (getOrder e oi) with next := none, prev := none }
+    let e := setOrder e oi o'
+    (e, some oi)
 
-private def fmtMatch (buy sell : Order) (qty : Qty) : String :=
-  "MATCH: Buy " ++ toString buy.id ++ " @ " ++ toString buy.price ++
-  " matches Sell " ++ toString sell.id ++ " @ " ++ toString sell.price ++
-  " for " ++ toString qty ++ " qty"
+-- -----------------------------
+-- Logic
+-- -----------------------------
 
-/-- One iteration of the C `while(true)` matching loop. -/
-def matchStep (e : Engine) : (Engine × Bool) :=
-  let bestBuy? := getBestBuy e e.book.buy_levels
-  let bestSell? := getBestSell e e.book.sell_levels
-  match bestBuy?, bestSell? with
-  | some bi, some si =>
-      match getLevel? e bi, getLevel? e si with
-      | some bl, some sl =>
-          if bl.price < sl.price then
-            (e, false)
-          else
-            match bl.orders, sl.orders with
-            | bo :: _, so :: _ =>
-                match e.orders.get! bo, e.orders.get! so with
-                | some buyO, some sellO =>
-                    let qty := Nat.min buyO.quantity sellO.quantity
-                    let buyO' := { buyO with quantity := buyO.quantity - qty }
-                    let sellO' := { sellO with quantity := sellO.quantity - qty }
-                    let e1 := { e with
-                      orders := (e.orders.set! bo (some buyO')).set! so (some sellO')
-                      log := e.log ++ [fmtMatch buyO sellO qty] }
-                    -- cleanup filled orders
-                    let (e2, _) :=
-                      if buyO'.quantity == 0 then
-                        let (eD, o?) := dequeueOrderAtLevel e1 bi
-                        match o? with
-                        | none => (eD, none)
-                        | some oidx => (freeOrder eD oidx, some oidx)
-                      else (e1, none)
-                    let (e3, _) :=
-                      if sellO'.quantity == 0 then
-                        let (eD, o?) := dequeueOrderAtLevel e2 si
-                        match o? with
-                        | none => (eD, none)
-                        | some oidx => (freeOrder eD oidx, some oidx)
-                      else (e2, none)
-                    -- cleanup empty levels
-                    let e4 :=
-                      match getLevel? e3 bi with
-                      | some bl2 =>
-                          if bl2.orders.isEmpty then
-                            let (eR, newRoot) := removeBestBuyNode e3 e3.book.buy_levels
-                            { eR with book := { eR.book with buy_levels := newRoot } }
-                          else e3
-                      | none => e3
-                    let e5 :=
-                      match getLevel? e4 si with
-                      | some sl2 =>
-                          if sl2.orders.isEmpty then
-                            let (eR, newRoot) := removeBestSellNode e4 e4.book.sell_levels
-                            { eR with book := { eR.book with sell_levels := newRoot } }
-                          else e4
-                      | none => e4
-                    (e5, true)
-                | _, _ => (e, false)
-            | _, _ => (e, false)
-      | _, _ => (e, false)
-  | _, _ => (e, false)
+/-- Submit a new order (C `submit_order`).
 
-/-- Run matching until no further progress is possible. -/
-def matchOrders (e : Engine) : Engine :=
-  let rec loop (fuel : Nat) (e : Engine) : Engine :=
-    match fuel with
-    | 0 => e
-    | fuel + 1 =>
-        let (e', cont) := matchStep e
-        if cont then loop fuel e' else e'
-  -- fuel bound: at most orders can be fully filled; use a safe upper bound.
-  loop (MAX_ORDERS * 2 + MAX_LEVELS * 2) e
+Drops on OOM. If a level cannot be allocated, the order is freed back.
+-/
+def submit_order (e : Engine) (id price quantity : U32) (side : Side) : Engine :=
+  let (e, oi?) := alloc_order e
+  match oi? with
+  | none => e
+  | some oi =>
+    let o0 := getOrder e oi
+    let o := { o0 with id := id, price := price, quantity := quantity, side := side }
+    let e := setOrder e oi o
+    let (e, li?) := insert_level e side price
+    match li? with
+    | none => free_order e oi
+    | some li => enqueue_order e li oi
 
-end Engine
+/-- Match loop (C `match_orders`).
+
+Returns `(engine', logs)` where each log line matches the C `printf` format.
+-/
+partial def match_orders (e : Engine) : Engine × Array String :=
+  let rec loop (e : Engine) (logs : Array String) : Engine × Array String :=
+    let bestBuy? := get_best_buy e e.book.buy_levels
+    let bestSell? := get_best_sell e e.book.sell_levels
+    match bestBuy?, bestSell? with
+    | some bi, some si =>
+      let bestBuy := getLevel e bi
+      let bestSell := getLevel e si
+      if bestBuy.price < bestSell.price then
+        (e, logs)
+      else
+        match bestBuy.orders_head, bestSell.orders_head with
+        | some boi, some soi =>
+          let buyOrder := getOrder e boi
+          let sellOrder := getOrder e soi
+          let qty : U32 := if buyOrder.quantity < sellOrder.quantity then buyOrder.quantity else sellOrder.quantity
+          let logs :=
+            logs.push
+              s!"MATCH: Buy {buyOrder.id} @ {buyOrder.price} matches Sell {sellOrder.id} @ {sellOrder.price} for {qty} qty\n"
+          let e := setOrder e boi { buyOrder with quantity := buyOrder.quantity - qty }
+          let sellNow := getOrder e soi
+          let e := setOrder e soi { sellNow with quantity := sellNow.quantity - qty }
+          let e :=
+            if (getOrder e boi).quantity == 0 then
+              let (e2, o?) := dequeue_order e bi
+              match o? with
+              | none => e2
+              | some oidx => free_order e2 oidx
+            else e
+          let e :=
+            if (getOrder e soi).quantity == 0 then
+              let (e2, o?) := dequeue_order e si
+              match o? with
+              | none => e2
+              | some oidx => free_order e2 oidx
+            else e
+          let e :=
+            if (getLevel e bi).orders_head.isNone then
+              remove_best_buy_node e
+            else e
+          let e :=
+            if (getLevel e si).orders_head.isNone then
+              remove_best_sell_node e
+            else e
+          loop e logs
+        | _, _ => (e, logs)
+    | _, _ => (e, logs)
+  loop e #[]
 
 end Spec.order_engine
