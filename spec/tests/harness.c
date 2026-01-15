@@ -1,81 +1,68 @@
-#include "../../examples/order_engine/engine.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
+#include <stdint.h>
+#include <stdlib.h>
 
-static int is_ws(char c) {
-  return c==' '||c=='\t'||c=='\r'||c=='\n';
+#include "../../examples/order_engine/engine.h"
+
+static uint32_t parse_u32_tok(const char *s) {
+    if (s == NULL || *s == '\0') return 0;
+    // accept only digits; otherwise 0
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return 0;
+    }
+    unsigned long long v = strtoull(s, NULL, 10);
+    return (uint32_t)v;
 }
 
-static char *next_tok(char **p) {
-  char *s = *p;
-  while (*s && is_ws(*s)) s++;
-  if (!*s) { *p = s; return NULL; }
-  char *t = s;
-  while (*t && !is_ws(*t)) t++;
-  if (*t) *t++ = 0;
-  *p = t;
-  return s;
+static Side parse_side_tok(const char *s) {
+    if (s && strcmp(s, "B") == 0) return SIDE_BUY;
+    return SIDE_SELL;
 }
 
 int main(void) {
-  Engine engine;
-  int inited = 0;
+    Engine engine;
+    int inited = 0;
 
-  // Read entire stdin into memory for speed/determinism.
-  fseek(stdin, 0, SEEK_END);
-  long sz = ftell(stdin);
-  if (sz < 0) sz = 0;
-  fseek(stdin, 0, SEEK_SET);
-  char *buf = (char*)malloc((size_t)sz + 1);
-  if (!buf) return 1;
-  size_t got = fread(buf, 1, (size_t)sz, stdin);
-  buf[got] = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), stdin)) {
+        // tokenize
+        char *toks[16];
+        int nt = 0;
+        char *save = NULL;
+        for (char *tok = strtok_r(line, " \t\r\n", &save);
+             tok != NULL && nt < 16;
+             tok = strtok_r(NULL, " \t\r\n", &save)) {
+            toks[nt++] = tok;
+        }
+        if (nt == 0) continue;
 
-  char *cur = buf;
-  while (*cur) {
-    // get line
-    char *line = cur;
-    while (*cur && *cur != '\n') cur++;
-    if (*cur == '\n') { *cur = 0; cur++; }
+        if (strcmp(toks[0], "INIT") == 0 && nt == 1) {
+            init_engine(&engine);
+            inited = 1;
+            printf("OK\n");
+            continue;
+        }
 
-    // trim leading spaces
-    while (*line && is_ws(*line)) line++;
-    if (!*line) continue;
+        if (!inited) {
+            init_engine(&engine);
+            inited = 1;
+        }
 
-    char *p = line;
-    char *cmd = next_tok(&p);
-    if (!cmd) continue;
-
-    if (strcmp(cmd, "INIT") == 0) {
-      init_engine(&engine);
-      inited = 1;
-      fputs("OK\n", stdout);
-    } else if (strcmp(cmd, "SUB") == 0) {
-      char *sid = next_tok(&p);
-      char *spr = next_tok(&p);
-      char *sq = next_tok(&p);
-      char *ss = next_tok(&p);
-      if (!inited || !sid || !spr || !sq || !ss) {
-        fputs("ERR\n", stdout);
-        continue;
-      }
-      uint32_t id = (uint32_t)strtoul(sid, NULL, 10);
-      uint32_t pr = (uint32_t)strtoul(spr, NULL, 10);
-      uint32_t qty = (uint32_t)strtoul(sq, NULL, 10);
-      Side side = (ss[0] == 'B') ? SIDE_BUY : SIDE_SELL;
-      submit_order(&engine, id, pr, qty, side);
-      fputs("OK\n", stdout);
-    } else if (strcmp(cmd, "MAT") == 0) {
-      if (!inited) { fputs("ERR\n", stdout); continue; }
-      match_orders(&engine);
-      fputs("OK\n", stdout);
-    } else {
-      fputs("ERR\n", stdout);
+        if (strcmp(toks[0], "MATCH") == 0 && nt == 1) {
+            match_orders(&engine);
+            printf("OK\n");
+        } else if (strcmp(toks[0], "SUBMIT") == 0 && nt >= 5) {
+            uint32_t id = parse_u32_tok(toks[1]);
+            uint32_t price = parse_u32_tok(toks[2]);
+            uint32_t qty = parse_u32_tok(toks[3]);
+            Side side = parse_side_tok(toks[4]);
+            submit_order(&engine, id, price, qty, side);
+            printf("OK\n");
+        } else {
+            printf("ERR\n");
+        }
     }
-  }
 
-  free(buf);
-  return 0;
+    return 0;
 }

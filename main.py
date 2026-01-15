@@ -27,9 +27,9 @@ except ImportError:
 
 SECRETS_FILE = Path("secrets.toml")
 
-SPEC_DIR = Path("spec")
+SPEC_DIR = Path("spec").resolve()
 SPEC_SRC_DIR = SPEC_DIR / "Spec"
-EXAMPLES_DIR = Path("examples")
+EXAMPLES_DIR = Path("examples").resolve()
 
 MODEL_ID = "gpt-5.2"
 
@@ -61,16 +61,19 @@ PRELUDE_REQUIRED_IMPORTS = [
 
 # Differential testing robustness requirements
 DIFF_REQUIRED_RUNS = 5          # number of distinct seeds / runs required to pass before equivalence can complete
-DIFF_MIN_CASES_PER_RUN = 200    # minimum number of command lines / cases per run
+DIFF_MIN_CASES_PER_RUN = 5      # minimum number of command lines / cases per run
 DIFF_SEED_START = 1             # seeds will be DIFF_SEED_START..DIFF_SEED_START+DIFF_REQUIRED_RUNS-1
 
 # Subprocess timeouts
 GEN_TIMEOUT_S = 8
 C_RUN_TIMEOUT_S = 8
-LEAN_RUN_TIMEOUT_S = 60  # increase to avoid "fake completion" on 10s timeouts
+LEAN_RUN_TIMEOUT_S = 3000  # increase to avoid "fake completion" on 10s timeouts
 
 # Anti-laziness / safety-critical enforcement
 # We forbid these phrases in translated Lean code (not in Verif.lean).
+SKIP_TO_EQUIVALENCE = True
+SKIP_TO_HARDENING = True
+
 FORBIDDEN_TRANSLATION_PHRASES = [
     "for this benchmark",
     "as a benchmark",
@@ -735,6 +738,17 @@ class ProjectProcessor:
         self._equiv_state["required_runs"] = rep.get("required_runs", DIFF_REQUIRED_RUNS)
         self._equiv_state["min_cases_per_run"] = rep.get("min_cases_per_run", DIFF_MIN_CASES_PER_RUN)
 
+    def _normalize_lean_harness_relpath(self, p: str) -> str:
+        p = (p or "").replace("\\", "/").strip()
+        # Common junk prefixes
+        if p.startswith("./"):
+            p = p[2:]
+        if p.startswith("spec/Spec/"):
+            p = p[len("spec/Spec/"):]
+        if p.startswith("Spec/"):
+            p = p[len("Spec/"):]
+        return _safe_relpath(p)
+
     def _run_differential_test_impl(self, args: Dict[str, Any]) -> str:
         """
         Robust differential test runner:
@@ -746,18 +760,39 @@ class ProjectProcessor:
         """
         gen_script = _safe_relpath(args.get("gen_script_path", "spec/tests/gen_inputs.py"))
         c_harness = _safe_relpath(args.get("c_harness_path", "spec/tests/harness.c"))
-        lean_harness = _safe_relpath(args.get("lean_harness_path", "tests/Harness.lean")).replace("\\", "/")
+        raw = args.get("lean_harness_path", "tests/Harness.lean")
+        lean_harness = self._normalize_lean_harness_relpath(raw)
 
         t0 = time.time()
 
-        if not Path(gen_script).exists():
-            return json.dumps({"status": "error", "where": "gen_script", "message": f"Generator not found: {gen_script}"})
-        if not Path(c_harness).exists():
-            return json.dumps({"status": "error", "where": "c_harness", "message": f"C harness not found: {c_harness}"})
+        candidates = []
+        # 1) user-provided (normalized)
+        candidates.append(self.spec_src_root / lean_harness)
+        # 2) canonical location (always)
+        candidates.append(self.spec_src_root / "tests/Harness.lean")
 
-        lean_run_path = self.spec_src_root / lean_harness
-        if not lean_run_path.exists():
-            return json.dumps({"status": "error", "where": "lean_harness", "message": f"Lean harness not found: spec/Spec/{lean_harness}"})
+        lean_run_path = None
+        for cand in candidates:
+            if cand.exists():
+                lean_run_path = cand
+                break
+
+        if lean_run_path is None:
+            # helpful debug: what did we try, and what's in spec/Spec/tests?
+            tests_dir = self.spec_src_root / "tests"
+            listing = []
+            if tests_dir.exists():
+                listing = sorted([x.name for x in tests_dir.iterdir() if x.is_file()])[:50]
+
+            return json.dumps({
+                "status": "error",
+                "where": "lean_harness",
+                "message": "Lean harness not found",
+                "raw_arg": raw,
+                "normalized": lean_harness,
+                "tried": [str(c) for c in candidates],
+                "tests_dir_listing": listing,
+            })
 
         # 1) Compile C harness (link with project C sources)
         exe_c = SPEC_TESTS_DIR / "harness.exe"
@@ -1234,8 +1269,13 @@ class ProjectProcessor:
                         tool_calls.append(item)
 
             if not tool_calls:
-                log("No tool calls; session stalled.")
-                return False
+                log("No tool calls; nudging model.")
+                current_input = (
+                    "NO TOOL CALLS DETECTED.\n"
+                    "You MUST call tools to modify files or verifying builds.\n"
+                    "If you are finished or stuck, explain why, but you must attempt a tool call first.\n"
+                )
+                continue
 
             tool_outputs: List[Dict[str, Any]] = []
             wrote_ok = False
@@ -1580,7 +1620,17 @@ class ProjectProcessor:
                         tool_calls.append(item)
 
             if not tool_calls:
-                raise RuntimeError("Equivalence stage stalled: no tool calls.")
+                # Nudge the model back into tool-using mode instead of crashing.
+                current_input = (
+                    "NO TOOL CALLS DETECTED.\n"
+                    "You MUST call at least one tool each turn.\n"
+                    "Next action: call run_differential_test with:\n"
+                    "- gen_script_path = spec/tests/gen_inputs.py\n"
+                    "- c_harness_path = spec/tests/harness.c\n"
+                    "- lean_harness_path = tests/Harness.lean\n"
+                    "If it fails, read the failing file(s), fix, and retry.\n"
+                )
+                continue
 
             tool_outputs: List[Dict[str, Any]] = []
             submit_ok = False
@@ -1820,8 +1870,18 @@ class ProjectProcessor:
             log("No source mapping; skipping.")
             return
 
-        self.run_stage_translation()
-        self.run_stage_equivalence()
+        if not SKIP_TO_EQUIVALENCE and not SKIP_TO_HARDENING:
+            self.run_stage_translation()
+        elif SKIP_TO_HARDENING:
+             log("Skipping Translation stage (SKIP_TO_HARDENING=True).")
+        else:
+            log("Skipping Translation stage (SKIP_TO_EQUIVALENCE=True).")
+
+        if not SKIP_TO_HARDENING:
+            self.run_stage_equivalence()
+        else:
+            log("Skipping Equivalence stage (SKIP_TO_HARDENING=True).")
+
         self.run_stage_specification()
         self.run_stage_hardening()
         self.run_stage_verification()

@@ -4,21 +4,24 @@ import Spec.order_engine.Engine
 /-!
 Translation of `engine.h` into Lean declarations.
 
-`engine.h` is a header-only API/type description. The executable semantics and
-all concrete type definitions are provided by `Spec.order_engine.Engine`
-(translation of `engine.c`).
+The C header `engine.h` provides constants, type declarations, and function
+prototypes for the matching engine.
 
-Lean's `export` command cannot re-export from the *current* namespace
-(`Spec.order_engine`) into itself (it is a self-export).  The declarations
-already live in `Spec.order_engine` via the imported module, so this file simply
-provides the header-level module without redeclaring or re-exporting anything.
+In this repository, the translated definitions and executable semantics live in
+`Spec.order_engine.Engine` (translation of `engine.c`).
+
+This module corresponds to the header role: it *re-exports* the API surface.
+
+Important: `Spec.order_engine.Engine` already defines these names in the
+`Spec.order_engine` namespace. Attempting to `abbrev`-alias them here causes
+name clashes.
+
+Therefore this file is intentionally thin: it only imports `Spec.Prelude` and
+`Spec.order_engine.Engine`, and provides no additional declarations.
 -/
 
 namespace Spec.order_engine
 
 open Spec
-
--- All declarations corresponding to `engine.h` are defined in
--- `Spec.order_engine.Engine` and are available in this namespace after import.
 
 end Spec.order_engine
