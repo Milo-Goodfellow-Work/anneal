@@ -73,6 +73,7 @@ LEAN_RUN_TIMEOUT_S = 3000  # increase to avoid "fake completion" on 10s timeouts
 # We forbid these phrases in translated Lean code (not in Verif.lean).
 SKIP_TO_EQUIVALENCE = True
 SKIP_TO_HARDENING = True
+SKIP_TO_VERIFICATION = True
 
 FORBIDDEN_TRANSLATION_PHRASES = [
     "for this benchmark",
@@ -967,6 +968,9 @@ class ProjectProcessor:
                 continue
             mod = "Spec." + ".".join(p.with_suffix("").parts)
             imports.append(f"import {mod}")
+
+        # Always import Verif.lean so it is included in the project build.
+        imports.append(f"import Spec.{self.name}.Verif")
 
         root_rel = f"{self.name}.lean"
         body = "\n".join(sorted(set(imports))) + "\n"
@@ -1870,20 +1874,26 @@ class ProjectProcessor:
             log("No source mapping; skipping.")
             return
 
-        if not SKIP_TO_EQUIVALENCE and not SKIP_TO_HARDENING:
+        if not SKIP_TO_EQUIVALENCE and not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION:
             self.run_stage_translation()
+        elif SKIP_TO_VERIFICATION:
+            log("Skipping Translation stage (SKIP_TO_VERIFICATION=True).")
         elif SKIP_TO_HARDENING:
              log("Skipping Translation stage (SKIP_TO_HARDENING=True).")
         else:
             log("Skipping Translation stage (SKIP_TO_EQUIVALENCE=True).")
 
-        if not SKIP_TO_HARDENING:
+        if not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION:
             self.run_stage_equivalence()
         else:
-            log("Skipping Equivalence stage (SKIP_TO_HARDENING=True).")
+            log("Skipping Equivalence stage.")
 
-        self.run_stage_specification()
-        self.run_stage_hardening()
+        if not SKIP_TO_VERIFICATION:
+            self.run_stage_specification()
+            self.run_stage_hardening()
+        else:
+            log("Skipping Spec & Hardening stages (SKIP_TO_VERIFICATION=True).")
+
         self.run_stage_verification()
 
 
