@@ -1,11 +1,26 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# =========================================================================================
+# ANNEAL: UNIVERSAL VERIFICATION AGENT
+# =========================================================================================
+# This toolchain is designed to translate AND verify programs from ANY source language
+# (C, C++, Rust, JavaScript, Python, Go, etc.) into Lean 4 for formal verification.
+#
+# While the current demo uses C ('order_engine'), the architecture is language-agnostic.
+# The 'harness' and 'differential testing' components are abstract interfaces that
+# can wrap any language runtime. DO NOT assume C-specific compilation steps (like 'gcc')
+# are eventually this will dispatch to language-specific drivers.
+# =========================================================================================
+
 import os
 import re
 import sys
 import time
 import json
+import shutil
+import signal
+import shlex
 import tomllib
 import asyncio
 import subprocess
@@ -72,8 +87,9 @@ LEAN_RUN_TIMEOUT_S = 3000  # increase to avoid "fake completion" on 10s timeouts
 # Anti-laziness / safety-critical enforcement
 # We forbid these phrases in translated Lean code (not in Verif.lean).
 SKIP_TO_EQUIVALENCE = True
-SKIP_TO_HARDENING = True
-SKIP_TO_VERIFICATION = True
+SKIP_TO_HARDENING = False
+SKIP_TO_SPECIFICATION = False  # Skip Translation and Equivalence, go straight to Specification
+SKIP_TO_VERIFICATION = False
 
 FORBIDDEN_TRANSLATION_PHRASES = [
     "for this benchmark",
@@ -118,6 +134,18 @@ def trunc(s: str, n: int = PRINT_TRUNC) -> str:
         return ""
     return s if len(s) <= n else (s[:n] + f"\n... (truncated, total {len(s)} chars)")
 
+def trunc_tail(s: str, n: int = PRINT_TRUNC) -> str:
+    """Truncate from the BEGINNING, keeping the END of the string.
+    
+    Useful for build output where warnings come first and actual errors come last.
+    Lean's lake build puts errors at the end, so we need to preserve those.
+    """
+    if s is None:
+        return ""
+    if len(s) <= n:
+        return s
+    return f"(... truncated {len(s) - n} chars from start ...)\n" + s[-(n):]
+
 def load_secrets() -> dict:
     if not SECRETS_FILE.exists():
         key = os.environ.get("OPENAI_API_KEY")
@@ -132,7 +160,7 @@ def load_secrets() -> dict:
         return tomllib.load(f)
 
 def _safe_relpath(p: str) -> str:
-    p = p.replace("\\", "/").lstrip("/")
+    p = (p or "").replace("\\", "/").lstrip("/")
     if p == "" or p == ".":
         raise ValueError("Empty path")
     parts = [x for x in p.split("/") if x not in ("", ".")]
@@ -390,6 +418,14 @@ TOOLS_SCHEMA = [
         [],
     ),
     _tool(
+        "restart_translation",
+        "CRITICAL: Call this only if you determine that the current translation is fundamentally flawed and cannot be fixed by editing files. This will discard current progress and restart the Translation stage with your feedback.",
+        {
+            "reason": {"type": "string", "description": "Detailed explanation of why the semantic mismatch is unfixable and requires re-translation."}
+        },
+        ["reason"],
+    ),
+    _tool(
         "run_differential_test",
         "Run robust differential tests (multiple seeds) between C harness and Lean harness; returns JSON status.",
         {
@@ -413,6 +449,15 @@ TOOLS_SCHEMA = [
 # ============================================================
 
 IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z0-9_.]+)\s*$", re.MULTILINE)
+
+# Verif.lean anti-smuggling policy:
+# - Verif.lean may contain theorems/lemmas (and supporting proof code), but must not define executable entities.
+# - This prevents runtime behavior from being "smuggled" through Verif.lean (which is imported for Aristotle).
+VERIF_FORBIDDEN_TOPLEVEL_RE = re.compile(
+    r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|protected|noncomputable|unsafe|partial)\s+)*"
+    r"(def|abbrev|instance|structure|inductive|axiom|constant|macro|syntax|notation|attribute)\b",
+    re.MULTILINE,
+)
 
 def validate_imports_for_project(project: str, content: str) -> Tuple[bool, List[str]]:
     """
@@ -488,18 +533,28 @@ def validate_basic_lean_shape(project: str, rel_path: str, content: str) -> Tupl
     if not ok_imports:
         return False, f"Import policy violated: {bad}. Only 'import Spec.Prelude' (and optionally Spec.{project}.*) allowed."
 
-    # Verif.lean is the only place we allow sorry
     is_verif = rel_path.replace("\\", "/").endswith("/Verif.lean")
-    if not is_verif:
-        if re.search(r"\bsorry\b", content):
-            return False, "Forbidden: 'sorry' is not allowed in translated/runtime Lean modules (only allowed in Verif.lean)."
+    if is_verif:
+        # Proofs-only: no executable definitions or axioms/macros/etc.
+        if VERIF_FORBIDDEN_TOPLEVEL_RE.search(content):
+            return (
+                False,
+                "Verif.lean is proofs-only (anti-smuggling): it must not contain def/abbrev/instance/structure/"
+                "inductive/axiom/constant/macro/syntax/notation/attribute.",
+            )
+        # 'sorry' is allowed here by design.
+        return True, ""
 
-        bad_phrase = _contains_forbidden_phrases(content)
-        if bad_phrase:
-            return False, f"Forbidden phrase detected in translated code: '{bad_phrase}'. Safety-critical mode forbids placeholders/benchmark language."
+    # Non-Verif files: strict anti-laziness and anti-placeholder rules.
+    if re.search(r"\bsorry\b", content):
+        return False, "Forbidden: 'sorry' is not allowed in translated/runtime Lean modules (only allowed in Verif.lean)."
 
-        if _looks_like_constant_true_safety_check(content):
-            return False, "Forbidden: safety-checking function appears to be a constant `true`. Implement the real check."
+    bad_phrase = _contains_forbidden_phrases(content)
+    if bad_phrase:
+        return False, f"Forbidden phrase detected in translated code: '{bad_phrase}'. Safety-critical mode forbids placeholders/benchmark language."
+
+    if _looks_like_constant_true_safety_check(content):
+        return False, "Forbidden: safety-checking function appears to be a constant `true`. Implement the real check."
 
     return True, ""
 
@@ -507,6 +562,12 @@ def validate_basic_lean_shape(project: str, rel_path: str, content: str) -> Tupl
 # ============================================================
 # Processor
 # ============================================================
+
+class RestartTranslationError(Exception):
+    """Raised when the model decides the translation is fundamentally flawed and needs a fresh start."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 class ProjectProcessor:
     def __init__(self, example_name: str, example_path: Path, client: OpenAI, secrets: dict):
@@ -544,6 +605,9 @@ class ProjectProcessor:
         # Autogenerated safety case path (text file)
         self.safety_case_rel: str = f"spec/reports/{self.name}_SafetyCase.md"
 
+        # Persisted equivalence report (runner-written, model-read-only by policy)
+        self.equiv_report_rel: str = f"spec/reports/{self.name}_EquivalenceReport.json"
+
     # ---------------- OpenAI helpers ----------------
 
     def _responses_create(
@@ -571,6 +635,41 @@ class ProjectProcessor:
     def _tool_output_item(self, call_id: str, out: str) -> Dict[str, Any]:
         return {"type": "function_call_output", "call_id": call_id, "output": out}
 
+    # ---------------- Equivalence report persistence ----------------
+
+    def _load_equiv_report_if_present(self) -> None:
+        p = Path(self.equiv_report_rel)
+        if not p.exists():
+            return
+        try:
+            rep = json.loads(_read_text_file(p))
+            if isinstance(rep, dict) and rep.get("status") == "success":
+                self._equiv_state["last_report"] = rep
+                self._equiv_state["last_status"] = "success"
+                self._equiv_state["passed_runs"] = int(rep.get("passed_runs", 0))
+                self._equiv_state["required_runs"] = int(rep.get("required_runs", DIFF_REQUIRED_RUNS))
+                self._equiv_state["min_cases_per_run"] = int(rep.get("min_cases_per_run", DIFF_MIN_CASES_PER_RUN))
+        except Exception:
+            # If malformed, ignore; we'll recompute during Equivalence.
+            return
+
+    def _persist_equiv_report_if_success(self) -> None:
+        rep = self._equiv_state.get("last_report")
+        if not isinstance(rep, dict):
+            return
+        if rep.get("status") != "success":
+            return
+        payload = {
+            "status": "success",
+            "saved_at_unix": int(time.time()),
+            "passed_runs": rep.get("passed_runs"),
+            "required_runs": rep.get("required_runs"),
+            "min_cases_per_run": rep.get("min_cases_per_run"),
+            "runs": rep.get("runs"),
+            "total_time_s": rep.get("total_time_s"),
+        }
+        _write_text_file(Path(self.equiv_report_rel), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
     # ---------------- Tool execution with write lockdown + stage gating ----------------
 
     def _execute_tool_call(self, item) -> Tuple[Dict[str, Any], bool]:
@@ -591,7 +690,14 @@ class ProjectProcessor:
             log_args["content"] = f"<{len(log_args['content'])} chars>"
         log(f"Call: {fname}({json.dumps(log_args)})")
 
+        # NOTE: RestartTranslationError must propagate to the outer loop.
         try:
+            if fname == "restart_translation":
+                reason = (args.get("reason") or "").strip()
+                if not reason:
+                    reason = "No reason provided."
+                raise RestartTranslationError(reason)
+
             if fname == "read_source_file":
                 rel = _safe_relpath(args["path"])
                 p = self.source_root / rel
@@ -605,7 +711,16 @@ class ProjectProcessor:
                 return self._tool_output_item(call_id, f"Error: File not found {rel}"), True
 
             if fname == "read_lean_file":
-                rel = _safe_relpath(args["path"])
+                rel = _safe_relpath(args["path"]).replace("\\", "/")
+
+                # Anti-smuggling: prevent reading Verif.lean before Equivalence has passed, unless
+                # we're in stages where Verif is supposed to be authored.
+                if rel == f"{self.name}/Verif.lean":
+                    stage = self._current_stage.upper()
+                    if stage not in ("SPECIFICATION", "HARDENING", "VERIFICATION"):
+                        if self._equiv_state.get("last_status") != "success":
+                            return self._tool_output_item(call_id, "Denied: Verif.lean is unavailable until after Equivalence succeeds."), False
+
                 p = self.spec_src_root / rel
                 if p.exists() and p.is_file():
                     out = _read_text_file(p)
@@ -618,6 +733,14 @@ class ProjectProcessor:
 
             if fname == "write_lean_file":
                 rel = _safe_relpath(args["path"]).replace("\\", "/")
+
+                # Stage-gated anti-smuggling: Verif.lean must not be edited until Equivalence succeeds.
+                if rel == f"{self.name}/Verif.lean":
+                    stage = self._current_stage.upper()
+                    if stage not in ("SPECIFICATION", "HARDENING", "VERIFICATION"):
+                        return self._tool_output_item(call_id, "Denied: Verif.lean is locked until Specification/Hardening."), False
+                    if self._equiv_state.get("last_status") != "success":
+                        return self._tool_output_item(call_id, "Denied: Equivalence has not succeeded; Verif.lean remains locked."), False
 
                 # Enforce file-level lockdown
                 if rel in self.locked_lean_paths:
@@ -672,7 +795,9 @@ class ProjectProcessor:
 
             if fname == "run_differential_test":
                 out_json = self._run_differential_test_impl(args)
+                log(f"[DiffTest Result] {out_json}")
                 self._update_test_state_from_report(out_json)
+                self._persist_equiv_report_if_success()
                 return self._tool_output_item(call_id, out_json), True
 
             if fname == "submit_stage":
@@ -685,6 +810,8 @@ class ProjectProcessor:
 
             return self._tool_output_item(call_id, f"Error: Unknown tool {fname}"), True
 
+        except RestartTranslationError:
+            raise
         except Exception as e:
             return self._tool_output_item(call_id, f"Tool execution error for {fname}: {e}"), False
 
@@ -700,6 +827,11 @@ class ProjectProcessor:
             b = run_lake_build(self.spec_pkg_root)
             if not b.startswith("Build Success"):
                 return False, "lake build is not successful; fix build errors first."
+            # Also require the test harness to compile (not part of default build)
+            if stage in ("EQUIVALENCE", "HARDENING"):
+                hb = run_lake_build_target(self.spec_pkg_root, target="Spec.tests.Harness")
+                if not hb.startswith("Build Success"):
+                    return False, "harness build failed; fix Spec.tests.Harness compilation errors."
 
         if stage == "EQUIVALENCE":
             rep = self._equiv_state.get("last_report")
@@ -761,6 +893,7 @@ class ProjectProcessor:
         """
         gen_script = _safe_relpath(args.get("gen_script_path", "spec/tests/gen_inputs.py"))
         c_harness = _safe_relpath(args.get("c_harness_path", "spec/tests/harness.c"))
+        source_harness = c_harness  # generalize variable name
         raw = args.get("lean_harness_path", "tests/Harness.lean")
         lean_harness = self._normalize_lean_harness_relpath(raw)
 
@@ -795,28 +928,132 @@ class ProjectProcessor:
                 "tests_dir_listing": listing,
             })
 
-        # 1) Compile C harness (link with project C sources)
-        exe_c = SPEC_TESTS_DIR / "harness.exe"
-        c_srcs = [
-            str(self.source_root / f)
-            for f in list_project_files(self.source_root)
-            if f.endswith(".c") and "main.c" not in f.replace("\\", "/").lower()
-        ]
-        c_cmd = ["gcc", "-O2", "-o", str(exe_c), str(Path(c_harness))] + c_srcs
-        proc_c = subprocess.run(c_cmd, capture_output=True, text=True)
-        if proc_c.returncode != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "c_compile",
-                "message": "C compile failed",
-                "stderr": trunc(proc_c.stderr, 3000),
-                "stdout": trunc(proc_c.stdout, 1500),
-            })
+        def _rc_desc(rc: int) -> str:
+            if rc < 0:
+                sig = -rc
+                try:
+                    return f"signal {signal.Signals(sig).name} ({rc})"
+                except Exception:
+                    return f"signal {sig} ({rc})"
+            return str(rc)
+
+        # 1) Compile Source Harness (Generic Support)
+        # Build as objects so we can: (a) apply strict warnings to harness only,
+        # (b) optionally silence project printf/puts without silencing harness,
+        # (c) report exact sources/commands.
+        exe_source = SPEC_TESTS_DIR / "harness.exe"
+        build_dir = SPEC_TESTS_DIR / "build"
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        if str(source_harness).endswith(".c"):
+            # Discover project .c files (exclude main.c)
+            proj_c_srcs = [
+                (self.source_root / f)
+                for f in list_project_files(self.source_root)
+                if f.endswith(".c") and "main.c" not in f.replace("\\", "/").lower()
+            ]
+
+            # Include dirs: root + any header dirs (helps “#include "engine.h"” style)
+            include_dirs = {str(self.source_root.resolve())}
+            for f in list_project_files(self.source_root):
+                if f.endswith((".h", ".hpp")):
+                    include_dirs.add(str((self.source_root / Path(f).parent).resolve()))
+            include_flags = [flag for d in sorted(include_dirs) for flag in ["-I", d]]
+
+            # Common flags
+            COMMON = ["-std=c11", "-O2", "-g", "-fno-omit-frame-pointer"]
+
+            # Make harness compilation strict about implicit decls (classic segfault cause)
+            HARNESS_C = str(Path(source_harness))
+            harness_o = build_dir / "harness.o"
+            harness_cmd = [
+                "gcc", *COMMON,
+                "-Wall", "-Wextra",
+                "-Werror=implicit-function-declaration",
+                "-Werror=return-type",
+                *include_flags,
+                "-c", HARNESS_C, "-o", str(harness_o),
+            ]
+
+            # NOTE: We do NOT silence project stdout. The project's printf/puts output
+            # is part of its observable semantics that the Lean translation must match.
+            # If the project has debug noise, the model must handle it (replicate or filter).
+            proj_macros: List[str] = []
+
+            proj_os: List[Path] = []
+            proj_compile_cmds: List[List[str]] = []
+            for src in proj_c_srcs:
+                obj = build_dir / (src.stem + ".o")
+                proj_os.append(obj)
+                proj_compile_cmds.append([
+                    "gcc", *COMMON,
+                    *proj_macros,
+                    *include_flags,
+                    "-c", str(src), "-o", str(obj),
+                ])
+
+            link_cmd = ["gcc", "-o", str(exe_source), str(harness_o)] + [str(o) for o in proj_os]
+
+            # Run harness compile
+            proc_h = subprocess.run(harness_cmd, capture_output=True, text=True)
+            if proc_h.returncode != 0:
+                return json.dumps({
+                    "status": "error",
+                    "where": "source_compile",
+                    "message": "Harness compile failed",
+                    "cmd": " ".join(shlex.quote(x) for x in harness_cmd),
+                    "stderr": trunc(proc_h.stderr, 3000),
+                    "stdout": trunc(proc_h.stdout, 1500),
+                })
+
+            # Compile project objects
+            for cmd in proj_compile_cmds:
+                proc_s = subprocess.run(cmd, capture_output=True, text=True)
+                if proc_s.returncode != 0:
+                    return json.dumps({
+                        "status": "error",
+                        "where": "source_compile",
+                        "message": "Project source compile failed",
+                        "cmd": " ".join(shlex.quote(x) for x in cmd),
+                        "stderr": trunc(proc_s.stderr, 3000),
+                        "stdout": trunc(proc_s.stdout, 1500),
+                    })
+
+            # Link
+            proc_l = subprocess.run(link_cmd, capture_output=True, text=True)
+            if proc_l.returncode != 0:
+                return json.dumps({
+                    "status": "error",
+                    "where": "source_link",
+                    "message": "Link failed",
+                    "cmd": " ".join(shlex.quote(x) for x in link_cmd),
+                    "stderr": trunc(proc_l.stderr, 3000),
+                    "stdout": trunc(proc_l.stdout, 1500),
+                })
+
+        else:
+            pass
 
         # 2) Ensure Lean builds
+        log("[DiffTest] Starting lake build...")
+        build_start = time.time()
         b_out = run_lake_build(self.spec_pkg_root)
+        log(f"[DiffTest] lake build completed in {time.time() - build_start:.1f}s")
         if not b_out.startswith("Build Success"):
             return json.dumps({"status": "error", "where": "lean_build", "message": "Lean build failed", "build": trunc(b_out, 4000)})
+
+        # Ensure the harness itself typechecks (it is not in the default build graph)
+        log("[DiffTest] Building harness target Spec.tests.Harness...")
+        harness_build_start = time.time()
+        hb = run_lake_build_target(self.spec_pkg_root, target="Spec.tests.Harness")
+        log(f"[DiffTest] Harness build completed in {time.time() - harness_build_start:.1f}s")
+        if not hb.startswith("Build Success"):
+            return json.dumps({
+                "status": "error",
+                "where": "lean_harness_build",
+                "message": "Lean harness does not typecheck",
+                "build": trunc_tail(hb, 4000),  # Use trunc_tail to show errors at end, not warnings at start
+            })
 
         # 3) Run multiple seeds
         runs: List[Dict[str, Any]] = []
@@ -861,27 +1098,51 @@ class ProjectProcessor:
                 })
 
             # Run C
+            log(f"[DiffTest] Running C harness (seed={seed}, {num_cases} cases)...")
+            c_start = time.time()
             try:
-                c_run = subprocess.run([str(exe_c)], input=inputs, capture_output=True, text=True, timeout=C_RUN_TIMEOUT_S)
+                c_run = subprocess.run(
+                    [str(exe_source)],
+                    input=inputs,
+                    capture_output=True,
+                    text=True,
+                    timeout=C_RUN_TIMEOUT_S
+                )
                 c_out = c_run.stdout
                 c_err = c_run.stderr
                 c_rc = c_run.returncode
+                log(f"[DiffTest] C harness done in {time.time() - c_start:.2f}s (rc={c_rc})")
             except subprocess.TimeoutExpired:
-                return json.dumps({"status": "timeout", "where": "c_run", "seed": seed, "message": f"C harness exceeded {C_RUN_TIMEOUT_S}s"})
+                return json.dumps({
+                    "status": "timeout",
+                    "where": "c_run",
+                    "seed": seed,
+                    "message": f"C harness exceeded {C_RUN_TIMEOUT_S}s",
+                    "inputs_tail": "\n".join(lines[-20:]),
+                })
             except Exception as e:
-                return json.dumps({"status": "error", "where": "c_run", "seed": seed, "message": str(e)})
+                return json.dumps({
+                    "status": "error",
+                    "where": "c_run",
+                    "seed": seed,
+                    "message": str(e),
+                    "inputs_tail": "\n".join(lines[-20:]),
+                })
 
             if c_rc != 0:
                 return json.dumps({
                     "status": "error",
                     "where": "c_run",
                     "seed": seed,
-                    "message": f"C harness exited {c_rc}",
-                    "stderr": trunc(c_err, 2000),
-                    "stdout": trunc(c_out, 2000),
+                    "message": f"C harness exited {_rc_desc(c_rc)}",
+                    "inputs_tail": "\n".join(lines[-40:]),
+                    "stderr": trunc(c_err, 3000),
+                    "stdout": trunc(c_out, 3000),
                 })
 
             # Run Lean
+            log(f"[DiffTest] Running Lean harness (seed={seed})...")
+            lean_start = time.time()
             try:
                 lean_cmd = ["lake", "env", "lean", "--run", str(lean_run_path)]
                 lean_run = subprocess.run(
@@ -895,6 +1156,7 @@ class ProjectProcessor:
                 lean_out = lean_run.stdout
                 lean_err = lean_run.stderr
                 lean_rc = lean_run.returncode
+                log(f"[DiffTest] Lean harness done in {time.time() - lean_start:.2f}s (rc={lean_rc})")
             except subprocess.TimeoutExpired:
                 return json.dumps({
                     "status": "timeout",
@@ -969,7 +1231,7 @@ class ProjectProcessor:
             mod = "Spec." + ".".join(p.with_suffix("").parts)
             imports.append(f"import {mod}")
 
-        # Always import Verif.lean so it is included in the project build.
+        # Always import Verif.lean so it is included in the project build (Aristotle requires a single project).
         imports.append(f"import Spec.{self.name}.Verif")
 
         root_rel = f"{self.name}.lean"
@@ -1019,15 +1281,16 @@ class ProjectProcessor:
                 )
                 _write_text_file(p, stub)
 
-        # Verif module (model-writable)
+        # Verif module (model-writable but stage-gated)
         verif_rel = f"{self.name}/Verif.lean"
         self.allowed_lean_writes.add(verif_rel)
         if not (self.spec_src_root / verif_rel).exists():
             verif_stub = (
                 "import Spec.Prelude\n\n"
                 f"namespace Spec.{self.name}\n\n"
-                "-- AUTOGENERATED SPEC STUB\n"
-                "-- Proofs may use sorry here, but statements must be meaningful.\n\n"
+                "-- AUTOGENERATED SPEC STUB (PROOFS-ONLY)\n"
+                "-- This file is imported for Aristotle; to prevent smuggling it must not define executable entities.\n"
+                "-- You may write theorems/lemmas here; 'sorry' is allowed here only.\n\n"
                 f"end Spec.{self.name}\n"
             )
             _write_text_file(self.spec_src_root / verif_rel, verif_stub)
@@ -1075,7 +1338,6 @@ class ProjectProcessor:
                 "    ap.add_argument('--n', type=int, required=True)\n"
                 "    args = ap.parse_args()\n"
                 "    random.seed(args.seed)\n"
-                "    # TODO: print args.n commands\n"
                 "    for _ in range(args.n):\n"
                 "        print('NOOP')\n"
                 "\n"
@@ -1126,6 +1388,9 @@ class ProjectProcessor:
         # Lock Prelude and project root module
         self.locked_lean_paths.add("Prelude.lean")
         self.locked_lean_paths.add(f"{self.name}.lean")
+
+        # If an equivalence report was persisted, load it (supports SKIP_TO_HARDENING workflows safely).
+        self._load_equiv_report_if_present()
 
         log("Autogenerated Spec/Spec scaffold and locked down writes.")
         log(f"Locked Lean files (read-only for model): {sorted(self.locked_lean_paths)}")
@@ -1213,7 +1478,8 @@ class ProjectProcessor:
             "SAFETY-CRITICAL RULES:\n"
             "- Never insert placeholder behavior. If you cannot implement something, you must read more files and implement it.\n"
             "- Do not 'assume true', 'stub', 'simplify away' semantics, or explain that you'd do more later.\n"
-            "- Translated/runtime modules MUST NOT use 'sorry'. Only Verif.lean may contain sorry.\n\n"
+            "- Translated/runtime modules MUST NOT use 'sorry'. Only Verif.lean may contain sorry.\n"
+            "- Verif.lean is proofs-only (anti-smuggling): no defs/instances/axioms/macros.\n\n"
             "WORKING STYLE:\n"
             "- Prefer simple, dependable data structures first (List/Array/Option/Nat/Int) *as long as semantics match*.\n"
             "- Keep IO minimal and deterministic.\n"
@@ -1437,7 +1703,7 @@ class ProjectProcessor:
             file_rel = e0.file.replace("\\", "/")
             if file_rel.startswith("Spec/"):
                 file_rel = file_rel[len("Spec/"):]  # drop "Spec/"
-            # At this point file_rel looks like: "order_engine.lean" or "order_engine/Engine2.lean"
+            # file_rel looks like: "order_engine.lean" or "order_engine/Engine2.lean"
 
             # If the first error is in a locked root module, try to unwrap the import failure.
             if file_rel in self.locked_lean_paths:
@@ -1533,15 +1799,30 @@ class ProjectProcessor:
 
         raise RuntimeError("Global repair exceeded max steps; refusing to proceed.")
 
-    def run_stage_translation(self) -> None:
+    def run_stage_translation(self, restart_reason: Optional[str] = None) -> None:
         log("--- Stage: Translation ---")
+        self._current_stage = "TRANSLATION"
+
+        if restart_reason:
+            log(f"[RESTART] Previous translation failed due to: {restart_reason[:200]}...")
 
         project_summary = self._project_summary()
+        if restart_reason:
+            # Inject the restart reason into the project summary so model sees it
+            project_summary = (
+                f"!!! IMPORTANT: A previous translation attempt failed during differential testing !!!\n"
+                f"Failure reason: {restart_reason}\n\n"
+                f"Pay close attention to faithfully matching the C semantics, especially:\n"
+                f"- Free-list ordering (LIFO stack behavior)\n"
+                f"- Pointer/index identity across operations\n"
+                f"- Numeric parsing (strtoul-like behavior)\n"
+                f"- Edge cases in allocator exhaustion\n\n"
+                + project_summary
+            )
         log("Project summary computed.")
 
         # Translate each source file to its target, then repair until that module builds.
-        # NEW BEHAVIOR (requested): after each file converges locally, do a full `lake build`
-        # and do not move on until the full project builds.
+        # After each file converges locally, do a full `lake build` and do not move on until the full project builds.
         for src_rel, out_rel in sorted(self.src_to_lean.items()):
             log(f"Translating {src_rel} -> {out_rel}")
 
@@ -1553,12 +1834,12 @@ class ProjectProcessor:
             if not ok:
                 raise RuntimeError(f"Failed to converge {out_rel} to a compiling state")
 
-            # ---- FULL PROJECT BUILD CHECK AFTER EACH FILE (requested) ----
+            # Full project build check after each file
             log("Full-project build check (after per-file convergence)...")
             self._repair_project_until_builds(project_summary=project_summary)
             log("Full-project build OK. Proceeding to next file.")
 
-        # Final full build (should be no-op now, but kept as a final sanity check).
+        # Final full build (sanity check).
         out = run_lake_build(self.spec_pkg_root)
         if not out.startswith("Build Success"):
             raise RuntimeError("Translation complete but lake build still fails (should not happen).")
@@ -1588,11 +1869,18 @@ class ProjectProcessor:
             "Harness contract (MANDATORY):\n"
             "- Both harnesses must parse the exact same command language.\n"
             "- Both must print deterministic stdout for each command.\n"
-            "- Keep it fast; avoid slow per-line Lean IO patterns.\n\n"
+            "- Keep it fast; avoid slow per-line Lean IO patterns.\n"
+            "- C harness: use standard C11. For strtok_r, add '#define _POSIX_C_SOURCE 200809L' before <string.h>.\n"
+            "- C harness: do NOT #include .c files directly. Only #include headers; linker provides implementations.\n"
+            "- Lean harness: The 'main' function MUST be visible to 'lean --run'. Either:\n"
+            "  (a) define 'def main' OUTSIDE any namespace, or\n"
+            "  (b) annotate with '@[main] def main' inside a namespace.\n"
+            "  If you get 'unknown declaration main', you probably have it inside a namespace without @[main].\n\n"
             "Testing requirement (MANDATORY):\n"
             f"- You MUST call run_differential_test until it returns JSON status=success with passed_runs={DIFF_REQUIRED_RUNS}.\n"
             f"- Each run must have >= {DIFF_MIN_CASES_PER_RUN} cases.\n"
             "- If you get timeouts or diffs, fix the problem and rerun.\n"
+            "- If the C harness crashes, treat it as a bug in generator/harness input validation or in the source engine; do NOT call restart_translation unless you have a confirmed semantic mismatch (status=diff).\n"
             "- You may edit translated Lean files to correct semantic mismatches.\n\n"
             "Note: you cannot finish this stage by calling submit_stage unless tests pass.\n\n"
             "Translated project Lean files:\n"
@@ -1679,10 +1967,11 @@ class ProjectProcessor:
         user_payload = (
             "TASK: Write a SPECIFICATION for the translated project.\n"
             "This is SAFETY-CRITICAL: the spec must be meaningful, not generic.\n"
-            "Proofs may use sorry here, but statements must connect to the translated definitions.\n\n"
+            "Proofs may use sorry here, but statements must connect to the translated definitions.\n"
+            "IMPORTANT: Verif.lean is proofs-only (anti-smuggling): do NOT introduce def/abbrev/instance/axiom/etc.\n\n"
             f"TARGET: {out_rel}\n\n"
             "REQUIREMENTS:\n"
-            "- Include at least 10 non-trivial definitions/theorems.\n"
+            "- Include at least 10 non-trivial theorems/lemmas.\n"
             "- Include invariants about memory safety / bounds (arrays/pools), functional correctness conditions, and determinism.\n"
             "- Include at least 2 theorems that connect a multi-step scenario to postconditions.\n"
             "- Make sure the file parses and typechecks.\n\n"
@@ -1704,9 +1993,40 @@ class ProjectProcessor:
         if not ok:
             raise RuntimeError("Specification session stalled.")
 
-        out = run_lake_build(self.spec_pkg_root)
-        if not out.startswith("Build Success"):
-            raise RuntimeError("Spec written but project no longer builds.")
+        # Repair loop: if Verif.lean broke the build, ask model to fix it
+        for repair_step in range(10):
+            out = run_lake_build(self.spec_pkg_root)
+            if out.startswith("Build Success"):
+                break
+            log(f"Spec repair step {repair_step + 1}: build failed, asking model to fix Verif.lean")
+
+            errs = parse_lean_errors(out, max_n=6)
+            err_lines = "\n".join([f"{e.file}:{e.line}:{e.col}: {e.msg}" for e in errs])
+            verif_content = _read_text_file(self.spec_src_root / out_rel) if (self.spec_src_root / out_rel).exists() else ""
+
+            repair_payload = (
+                "TASK: Fix the Verif.lean file so the project builds.\n"
+                "The specification you wrote has errors. Fix them while keeping meaningful theorems.\n\n"
+                f"TARGET: {out_rel}\n\n"
+                "CURRENT CONTENT:\n"
+                f"{trunc(verif_content, 8000)}\n\n"
+                "BUILD ERRORS:\n"
+                f"{trunc(err_lines, 3000)}\n\n"
+                "FULL BUILD OUTPUT:\n"
+                f"{trunc(out, 3000)}\n"
+            )
+
+            repair_ok = self._session_until_successful_write(
+                stage="SPECIFICATION (repair)",
+                focus_src="(project)",
+                focus_out=out_rel,
+                user_payload=repair_payload,
+                max_turns=8,
+            )
+            if not repair_ok:
+                log("Spec repair session stalled; retrying...")
+        else:
+            raise RuntimeError("Specification stage: Verif.lean could not be repaired after 10 attempts.")
 
         log("Specification complete: typechecks.")
 
@@ -1867,6 +2187,7 @@ class ProjectProcessor:
     # ---------------- Main runner ----------------
 
     def run(self) -> None:
+        global SKIP_TO_EQUIVALENCE, SKIP_TO_SPECIFICATION
         log(f"=== Processing Project: {self.name} ===")
         self._autogen_scaffold_and_lockdown()
 
@@ -1874,27 +2195,48 @@ class ProjectProcessor:
             log("No source mapping; skipping.")
             return
 
-        if not SKIP_TO_EQUIVALENCE and not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION:
-            self.run_stage_translation()
-        elif SKIP_TO_VERIFICATION:
-            log("Skipping Translation stage (SKIP_TO_VERIFICATION=True).")
-        elif SKIP_TO_HARDENING:
-             log("Skipping Translation stage (SKIP_TO_HARDENING=True).")
-        else:
-            log("Skipping Translation stage (SKIP_TO_EQUIVALENCE=True).")
 
-        if not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION:
-            self.run_stage_equivalence()
-        else:
-            log("Skipping Equivalence stage.")
+        restart_reason: Optional[str] = None  # Passed to Translation on restart
+        while True:  # Outer loop for Kickback Mechanism (from any stage)
+            try:
+                if not SKIP_TO_EQUIVALENCE and not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION and not SKIP_TO_SPECIFICATION:
+                    self.run_stage_translation(restart_reason=restart_reason)
+                elif SKIP_TO_VERIFICATION:
+                    log("Skipping Translation stage (SKIP_TO_VERIFICATION=True).")
+                elif SKIP_TO_HARDENING:
+                    log("Skipping Translation stage (SKIP_TO_HARDENING=True).")
+                elif SKIP_TO_SPECIFICATION:
+                    log("Skipping Translation stage (SKIP_TO_SPECIFICATION=True).")
+                else:
+                    log("Skipping Translation stage (SKIP_TO_EQUIVALENCE=True).")
 
-        if not SKIP_TO_VERIFICATION:
-            self.run_stage_specification()
-            self.run_stage_hardening()
-        else:
-            log("Skipping Spec & Hardening stages (SKIP_TO_VERIFICATION=True).")
+                if not SKIP_TO_HARDENING and not SKIP_TO_VERIFICATION and not SKIP_TO_SPECIFICATION:
+                    self.run_stage_equivalence()
+                else:
+                    log("Skipping Equivalence stage.")
 
-        self.run_stage_verification()
+                if not SKIP_TO_VERIFICATION:
+                    self.run_stage_specification()
+                    self.run_stage_hardening()
+                else:
+                    log("Skipping Spec & Hardening stages (SKIP_TO_VERIFICATION=True).")
+
+                self.run_stage_verification()
+
+                # If we get here, all stages passed. Exit the loop.
+                break
+
+            except RestartTranslationError as e:
+                log(f"\n!!! KICKBACK TRIGGERED: {e.reason} !!!")
+                log("Restarting Translation Stage with fresh context...\n")
+                restart_reason = e.reason  # Pass reason to next Translation iteration
+                # Ensure we will actually translate on the next loop.
+                if SKIP_TO_EQUIVALENCE or SKIP_TO_HARDENING or SKIP_TO_VERIFICATION or SKIP_TO_SPECIFICATION:
+                    log("WARNING: Kickback triggered but SKIP flags are active. Disabling all SKIP flags to allow re-translation.")
+                    SKIP_TO_EQUIVALENCE = False
+                    SKIP_TO_SPECIFICATION = False
+                    # Keep SKIP_TO_HARDENING and SKIP_TO_VERIFICATION as-is since they're more drastic
+                continue
 
 
 # ============================================================
