@@ -4,29 +4,29 @@ Anneal Stages - Equivalence stage implementation.
 This stage implements robust differential testing between C and Lean harnesses.
 """
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict
 
-if TYPE_CHECKING:
-    from ..processor import ProjectProcessor
-
-from ..helpers import (
+from helpers import (
     log, trunc, run_lake_build, _limit_lines,
     DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
 )
+from stages.llm import responses_create, execute_tool_call
+from stages.prompts import base_instructions
+from stages.diff_test import run_differential_test_impl
 
 
-def run_stage_equivalence(proc: "ProjectProcessor") -> None:
+def run_stage_equivalence(ctx: dict) -> None:
     """Run the Equivalence stage - differential testing between C and Lean."""
     log("--- Stage: Equivalence ---")
-    proc._current_stage = "EQUIVALENCE"
+    ctx["current_stage"] = "EQUIVALENCE"
 
-    project_files = sorted([p for p in proc.allowed_lean_writes if p.startswith(f"{proc.name}/")])
-    instructions = proc._base_instructions(stage="EQUIVALENCE")
+    project_files = sorted([p for p in ctx["allowed_lean_writes"] if p.startswith(f"{ctx['name']}/")])
+    instructions = base_instructions(ctx, stage="EQUIVALENCE")
 
     brief = (
         "TASK: Implement ROBUST differential testing in a safety-critical setting.\n"
         "You must implement these writable files:\n"
-        f"- {proc.safety_case_rel} (NOT in this stage; that's hardening)\n"
+        f"- {ctx['safety_case_rel']} (NOT in this stage; that's hardening)\n"
         "- spec/tests/gen_inputs.py\n"
         "- spec/tests/harness.c\n"
         "- tests/Harness.lean (under spec/Spec/)\n\n"
@@ -60,7 +60,8 @@ def run_stage_equivalence(proc: "ProjectProcessor") -> None:
 
     for turn in range(60):
         log(f"Turn {turn+1}")
-        resp = proc._responses_create(
+        resp = responses_create(
+            ctx,
             instructions=instructions,
             input_data=current_input,
             previous_response_id=previous_response_id,
@@ -80,7 +81,6 @@ def run_stage_equivalence(proc: "ProjectProcessor") -> None:
                     tool_calls.append(item)
 
         if not tool_calls:
-            # Nudge the model back into tool-using mode instead of crashing.
             current_input = (
                 "NO TOOL CALLS DETECTED.\n"
                 "You MUST call at least one tool each turn.\n"
@@ -96,7 +96,7 @@ def run_stage_equivalence(proc: "ProjectProcessor") -> None:
         submit_ok = False
 
         for call in tool_calls:
-            out_item, ok = proc._execute_tool_call(call)
+            out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
             tool_outputs.append(out_item)
             if call.name == "submit_stage" and ok:
                 submit_ok = True
@@ -106,11 +106,11 @@ def run_stage_equivalence(proc: "ProjectProcessor") -> None:
         if submit_ok:
             break
 
-    out = run_lake_build(proc.spec_pkg_root)
+    out = run_lake_build(ctx["spec_pkg_root"])
     if not out.startswith("Build Success"):
         raise RuntimeError("Equivalence ended but build fails.")
 
-    if proc._equiv_state.get("last_status") != "success" or proc._equiv_state.get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
+    if ctx["equiv_state"].get("last_status") != "success" or ctx["equiv_state"].get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
         raise RuntimeError("Equivalence ended without robust passing differential tests (should not happen due to gating).")
 
     log("Equivalence complete: robust differential tests passed.")

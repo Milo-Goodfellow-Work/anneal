@@ -10,8 +10,7 @@ import time
 import tomllib
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple, Any
-from dataclasses import dataclass
+from typing import List, Optional, Dict, Tuple, Any, NamedTuple
 
 
 # ============================================================
@@ -61,12 +60,6 @@ DIFF_SEED_START = 1             # seeds will be DIFF_SEED_START..DIFF_SEED_START
 GEN_TIMEOUT_S = 8
 C_RUN_TIMEOUT_S = 8
 LEAN_RUN_TIMEOUT_S = 3000  # increase to avoid "fake completion" on 10s timeouts
-
-# Skip flags
-SKIP_TO_EQUIVALENCE = True
-SKIP_TO_HARDENING = False
-SKIP_TO_SPECIFICATION = False  # Skip Translation and Equivalence, go straight to Specification
-SKIP_TO_VERIFICATION = False
 
 FORBIDDEN_TRANSLATION_PHRASES = [
     "for this benchmark",
@@ -265,8 +258,7 @@ LEAN_ERR_RE = re.compile(
     re.MULTILINE,
 )
 
-@dataclass
-class LeanError:
+class LeanError(NamedTuple):
     file: str
     line: int
     col: int

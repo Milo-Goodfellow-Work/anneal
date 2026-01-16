@@ -6,43 +6,43 @@ This stage writes safety case documentation and improves robustness.
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict
 
-if TYPE_CHECKING:
-    from ..processor import ProjectProcessor
-
-from ..helpers import (
+from helpers import (
     log, trunc, run_lake_build, _read_text_file, _limit_lines,
     DIFF_REQUIRED_RUNS,
 )
+from stages.llm import responses_create, execute_tool_call
+from stages.prompts import base_instructions
+from stages.diff_test import run_differential_test_impl
 
 
-def run_stage_hardening(proc: "ProjectProcessor") -> None:
+def run_stage_hardening(ctx: dict) -> None:
     """Run the Hardening stage - write safety case and improve robustness."""
     log("--- Stage: Hardening (Safety Case + Improvements) ---")
-    proc._current_stage = "HARDENING"
+    ctx["current_stage"] = "HARDENING"
 
-    instructions = proc._base_instructions(stage="HARDENING")
+    instructions = base_instructions(ctx, stage="HARDENING")
 
-    last_rep = proc._equiv_state.get("last_report")
+    last_rep = ctx["equiv_state"].get("last_report")
     rep_str = json.dumps(last_rep, indent=2) if isinstance(last_rep, dict) else str(last_rep)
 
-    project_lean_files = sorted([p for p in proc.allowed_lean_writes if p.startswith(f"{proc.name}/") and p.endswith(".lean")])
+    project_lean_files = sorted([p for p in ctx["allowed_lean_writes"] if p.startswith(f"{ctx['name']}/") and p.endswith(".lean")])
     sample_files = _limit_lines(project_lean_files, 8)
     samples: List[str] = []
     for rel in sample_files:
-        p = proc.spec_src_root / rel
+        p = ctx["spec_src_root"] / rel
         if p.exists():
             samples.append(f"FILE: {rel}\n" + trunc(_read_text_file(p), 2400))
 
-    harness_lean = _read_text_file(proc.spec_src_root / "tests/Harness.lean") if (proc.spec_src_root / "tests/Harness.lean").exists() else ""
+    harness_lean = _read_text_file(ctx["spec_src_root"] / "tests/Harness.lean") if (ctx["spec_src_root"] / "tests/Harness.lean").exists() else ""
     gen_py = _read_text_file(Path("spec/tests/gen_inputs.py")) if Path("spec/tests/gen_inputs.py").exists() else ""
     c_h = _read_text_file(Path("spec/tests/harness.c")) if Path("spec/tests/harness.c").exists() else ""
 
     payload = (
         "TASK: HARDEN the result for safety-critical confidence.\n\n"
         "Step A (required): Write an expert-facing Safety Case markdown file at:\n"
-        f"- {proc.safety_case_rel}\n"
+        f"- {ctx['safety_case_rel']}\n"
         "It must argue (to a formal methods expert) why your translation, differential tests, and spec are robust.\n"
         "It must include:\n"
         "- Explicit claims (translation correctness, test adequacy, harness determinism, spec relevance)\n"
@@ -75,7 +75,8 @@ def run_stage_hardening(proc: "ProjectProcessor") -> None:
 
     for turn in range(80):
         log(f"Turn {turn+1}")
-        resp = proc._responses_create(
+        resp = responses_create(
+            ctx,
             instructions=instructions,
             input_data=current_input,
             previous_response_id=previous_response_id,
@@ -101,7 +102,7 @@ def run_stage_hardening(proc: "ProjectProcessor") -> None:
         submit_ok = False
 
         for call in tool_calls:
-            out_item, ok = proc._execute_tool_call(call)
+            out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
             tool_outputs.append(out_item)
             if call.name == "submit_stage" and ok:
                 submit_ok = True
@@ -111,14 +112,14 @@ def run_stage_hardening(proc: "ProjectProcessor") -> None:
         if submit_ok:
             break
 
-    if not Path(proc.safety_case_rel).exists():
+    if not Path(ctx["safety_case_rel"]).exists():
         raise RuntimeError("Hardening ended but safety case file missing.")
 
-    out = run_lake_build(proc.spec_pkg_root)
+    out = run_lake_build(ctx["spec_pkg_root"])
     if not out.startswith("Build Success"):
         raise RuntimeError("Hardening ended but build fails.")
 
-    if proc._equiv_state.get("last_status") != "success" or proc._equiv_state.get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
+    if ctx["equiv_state"].get("last_status") != "success" or ctx["equiv_state"].get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
         raise RuntimeError("Hardening ended but robust differential tests not passing.")
 
     log("Hardening complete: safety case written and outputs improved, tests pass robustly.")
