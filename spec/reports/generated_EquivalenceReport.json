@@ -1,0 +1,35 @@
+{
+  "min_cases_per_run": 5,
+  "passed_runs": 5,
+  "required_runs": 5,
+  "runs": [
+    {
+      "cases": 6,
+      "seed": 1,
+      "status": "pass"
+    },
+    {
+      "cases": 6,
+      "seed": 2,
+      "status": "pass"
+    },
+    {
+      "cases": 6,
+      "seed": 3,
+      "status": "pass"
+    },
+    {
+      "cases": 6,
+      "seed": 4,
+      "status": "pass"
+    },
+    {
+      "cases": 6,
+      "seed": 5,
+      "status": "pass"
+    }
+  ],
+  "saved_at_unix": 1768621020,
+  "status": "success",
+  "total_time_s": 172.86
+}
