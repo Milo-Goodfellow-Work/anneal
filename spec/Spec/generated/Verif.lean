@@ -4,13 +4,18 @@ import Spec.generated.Main
 namespace Spec.generated
 
 /-
-  SPECIFICATION FILE
+  PLACEHOLDER SPECIFICATIONS
   
-  Aristotle will analyze Main.lean and generate appropriate theorems here.
-  This file must compile with Main.lean before submission.
+  Aristotle was not available to generate and prove specifications.
+  The implementation has been verified via differential testing.
+  
+  To complete formal verification:
+  1. Set ARISTOTLE_API_KEY in secrets.toml
+  2. Re-run the pipeline
+  
+  Or manually add specifications below.
 -/
 
--- Placeholder to ensure file is valid
-#check @Nat.add
+-- TODO: Add formal specifications here
 
 end Spec.generated

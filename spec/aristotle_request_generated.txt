@@ -1,0 +1,14 @@
+Analyze the Lean implementation in Spec.generated.Main and generate formal specifications.
+
+TASK: Write theorems in Spec/generated/Verif.lean that specify the correctness of:
+- All public functions and their expected behavior
+- Structural invariants for data types
+- Edge cases (empty inputs, bounds, etc.)
+
+REQUIREMENTS:
+1. All theorems must be fully proven (no sorry)
+2. Import Spec.generated.Main to access the definitions
+3. Use the namespace Spec.generated
+4. Theorems should be meaningful, not trivial
+
+The implementation file Main.lean has already been built and is available in the project context.
