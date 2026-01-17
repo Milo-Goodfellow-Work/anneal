@@ -36,3 +36,10 @@ COPY spec /opt/spec
 RUN cd /opt/spec \
   && lake exe cache get \
   && lake build -v
+
+# ---------- Setup .lake symlink for fast I/O ----------
+# When running in devcontainer, the workspace is on a 9p mount from Windows
+# which has very slow I/O. Keep .lake on native FS for fast compilation.
+# The postCreateCommand in devcontainer.json will set up the runtime symlink.
+RUN mkdir -p /root/spec-lake \
+  && echo "Spec build cache will be stored in /root/spec-lake for fast I/O"

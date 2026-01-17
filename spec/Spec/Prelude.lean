@@ -3,6 +3,8 @@ import Std.Data.TreeMap
 import Std.Data.TreeSet
 import Std.Data.HashMap
 import Std.Data.HashSet
+import Mathlib.Tactic
+import Aesop
 
 namespace Spec
 

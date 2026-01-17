@@ -49,6 +49,7 @@ PRELUDE_REQUIRED_IMPORTS = [
     "Std.Data.TreeSet",
     "Std.Data.HashMap",
     "Std.Data.HashSet",
+    "Mathlib",  # Import ALL of Mathlib so Aristotle can use any part
 ]
 
 # Differential testing robustness requirements
