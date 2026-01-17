@@ -1,14 +1,80 @@
-Analyze the Lean implementation in Spec.generated.Main and generate formal specifications.
+Generate formal specifications (theorems with proofs) for the Lean code in Spec.generated.Main.
 
-TASK: Write theorems in Spec/generated/Verif.lean that specify the correctness of:
-- All public functions and their expected behavior
-- Structural invariants for data types
-- Edge cases (empty inputs, bounds, etc.)
+CRITICAL INSTRUCTIONS:
+1. DO NOT redefine any types or functions - they are already defined in Main.lean
+2. IMPORT Main.lean using: import Spec.generated.Main
+3. Only ADD theorems that prove properties about the EXISTING definitions
+4. Write your output to Spec/generated/Verif.lean
 
-REQUIREMENTS:
-1. All theorems must be fully proven (no sorry)
-2. Import Spec.generated.Main to access the definitions
-3. Use the namespace Spec.generated
-4. Theorems should be meaningful, not trivial
+The definitions you should prove properties about are in Main.lean:
 
-The implementation file Main.lean has already been built and is available in the project context.
+```lean
+import Spec.Prelude
+
+namespace Spec.generated
+
+/-- Fixed capacity; must match C. -/
+def stackCapacity : Nat := 32
+
+/-- Stack represented as a list (top at head). This is pure and total.
+Capacity is enforced by operations (list length never exceeds `stackCapacity`). -/
+structure Stack where
+  xs : List Int32
+  deriving Repr, DecidableEq
+
+def stackEmpty : Stack := { xs := [] }
+
+def stackIsEmpty (s : Stack) : Bool := s.xs.isEmpty
+
+def stackIsFull (s : Stack) : Bool := s.xs.length ≥ stackCapacity
+
+structure StackRes where
+  stack : Stack
+  ok : Bool
+  deriving Repr, DecidableEq
+
+structure StackPopRes where
+  stack : Stack
+  value : Int32
+  ok : Bool
+  deriving Repr, DecidableEq
+
+structure StackPeekRes where
+  value : Int32
+  ok : Bool
+  deriving Repr, DecidableEq
+
+def stackPush (s : Stack) (x : Int32) : StackRes :=
+  if s.xs.length < stackCapacity then
+    { stack := { xs := x :: s.xs }, ok := true }
+  else
+    { stack := s, ok := false }
+
+def stackPop (s : Stack) : StackPopRes :=
+  match s.xs with
+  | [] => { stack := s, value := 0, ok := false }
+  | y :: ys => { stack := { xs := ys }, value := y, ok := true }
+
+def stackPeek (s : Stack) : StackPeekRes :=
+  match s.xs with
+  | [] => { value := 0, ok := false }
+  | y :: _ => { value := y, ok := true }
+
+end Spec.generated
+
+```
+
+REQUIRED THEOREMS:
+1. Structural invariants (e.g., data structure validity conditions)
+2. Functional correctness (operations have expected effects)
+3. Edge case handling (empty inputs, bounds, overflow)
+4. Push/pop or similar operation inverses where applicable
+
+OUTPUT FORMAT:
+- Start with: import Spec.Prelude
+- Then: import Spec.generated.Main
+- Open namespace: namespace Spec.generated
+- Add theorems referencing existing types like `Stack`, `stackPush`, etc.
+- All proofs must be complete (no sorry)
+
+Remember: DO NOT redefine Stack, StackRes, etc. They already exist in Main.lean.

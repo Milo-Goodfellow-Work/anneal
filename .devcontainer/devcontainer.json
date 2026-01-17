@@ -10,5 +10,5 @@
       ]
     }
   },
-  "postCreateCommand": "bash -c 'mkdir -p /root/spec-lake; if [ ! -d /root/spec-lake/build ]; then echo \"Copying pre-baked cache from /opt/spec/.lake...\"; cp -r /opt/spec/.lake/* /root/spec-lake/ 2>/dev/null || true; fi; rm -rf /workspaces/anneal/spec/.lake 2>/dev/null; ln -sf /root/spec-lake /workspaces/anneal/spec/.lake; echo \"Spec .lake symlinked to /root/spec-lake for fast I/O\"'"
+  "postCreateCommand": "bash -c 'rm -rf /workspaces/anneal/spec/.lake 2>/dev/null; ln -sf /opt/spec/.lake /workspaces/anneal/spec/.lake; echo \"Spec .lake symlinked to /opt/spec/.lake for fast native I/O\"'"
 }
