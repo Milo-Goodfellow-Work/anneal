@@ -14,9 +14,9 @@ The C implementation and Lean translation were developed simultaneously
 with integrated differential testing to ensure semantic equivalence.
 
 **Test Results:**
-- Passed Runs: 0/5
+- Passed Runs: 5/5
 - Minimum Cases per Run: 5
-- Total Test Time: 0.00s
+- Total Test Time: 229.33s
 
 ### Stage 2: Formal Specification and Proof
 
@@ -26,7 +26,7 @@ The Lean implementation has been formally specified and proven via Aristotle.
 
 | Criterion | Status |
 |-----------|--------|
-| Differential Tests | ⚠ INCOMPLETE |
+| Differential Tests | ✓ PASSED |
 | Lake Build | ✓ PASSED |
 | Formal Proofs | ✓ COMPLETE |
 

@@ -86,6 +86,7 @@ def run_stage_proving(ctx: dict) -> None:
         os.chdir(cwd)
 
         if result:
+            # result is the proven content from Aristotle
             verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
             _write_text_file(verif_path, result)
             log(f"Wrote proven specifications to {verif_path}")
@@ -98,6 +99,12 @@ def run_stage_proving(ctx: dict) -> None:
                 _repair_verif_or_fallback(ctx, result, bres)
             else:
                 log("Aristotle verification complete - specs proven!")
+        elif result is None:
+            # Async mode - Aristotle job submitted but not waiting for result
+            # Job ID was already logged. Just create placeholder and continue.
+            log("Aristotle job submitted (async). Creating placeholder Verif.lean.")
+            log("Check Aristotle dashboard for job status and retrieve result when complete.")
+            _create_placeholder_verif(ctx)
         else:
             log("Aristotle returned no result. Creating placeholder Verif.lean.")
             _create_placeholder_verif(ctx)
@@ -226,7 +233,8 @@ Remember: DO NOT redefine Stack, StackRes, etc. They already exist in Main.lean.
         
         if result:
             log(f"Aristotle job submitted. Project ID: {result}")
-            return f"Aristotle job submitted: {result}"
+            # Return None to indicate async mode - caller should not treat job ID as content
+            return None
         
         return None
 

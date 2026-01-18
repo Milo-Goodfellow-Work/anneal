@@ -1,59 +1,67 @@
 #include "arena.h"
 
-static int is_pow2(size_t x) {
-  return x != 0 && (x & (x - 1)) == 0;
+Arena arena_init(uint64_t capacity) {
+  Arena a;
+  a.capacity = capacity;
+  a.top = 0u;
+  return a;
 }
 
-static size_t align_up(size_t x, size_t a) {
-  /* a must be power of two */
-  return (x + (a - 1)) & ~(a - 1);
+uint64_t arena_used(const Arena* a) {
+  return a->top;
 }
 
-int arena_init(Arena *ar, uint8_t *buf, size_t cap, size_t cache_line) {
-  if (!ar || !buf) return 1;
-  if (cap == 0) return 2;
-  if (cache_line == 0) return 3;
-  if (!is_pow2(cache_line)) return 4;
-  ar->buf = buf;
-  ar->cap = cap;
-  ar->top = 0;
-  ar->cache_line = cache_line;
-  return 0;
+uint64_t arena_remaining(const Arena* a) {
+  if (a->top >= a->capacity) return 0u;
+  return a->capacity - a->top;
 }
 
-void *arena_alloc(Arena *ar, size_t n) {
-  if (!ar) return NULL;
-  if (n == 0) return NULL;
-  if (ar->cache_line == 0 || !is_pow2(ar->cache_line)) return NULL;
+Arena arena_alloc(Arena a, uint64_t size, uint64_t align, ArenaAllocResult* out) {
+  ArenaAllocResult r;
+  r.ok = false;
+  r.offset = 0u;
+  r.size = size;
+  r.align = align;
 
-  size_t start = align_up(ar->top, ar->cache_line);
-  if (start > ar->cap) return NULL;
-  if (n > ar->cap - start) return NULL;
+  if (!arena_is_pow2_u64(align)) {
+    if (out) *out = r;
+    return a;
+  }
 
-  ar->top = start + n;
-  return (void *)(ar->buf + start);
+  uint64_t alignedTop = arena_align_up_u64(a.top, align);
+
+  // overflow checks: alignedTop + size <= capacity
+  if (alignedTop > a.capacity) {
+    if (out) *out = r;
+    return a;
+  }
+  if (size > a.capacity - alignedTop) {
+    if (out) *out = r;
+    return a;
+  }
+
+  r.ok = true;
+  r.offset = alignedTop;
+
+  a.top = alignedTop + size;
+  if (out) *out = r;
+  return a;
 }
 
-ArenaMarker arena_mark(const Arena *ar) {
-  ArenaMarker m;
-  m.top = ar ? ar->top : 0;
-  return m;
+Arena arena_alloc_cacheline(Arena a, uint64_t size, ArenaAllocResult* out) {
+  return arena_alloc(a, size, (uint64_t)ARENA_CACHELINE, out);
 }
 
-int arena_reset(Arena *ar, ArenaMarker m) {
-  if (!ar) return 1;
-  if (m.top > ar->cap) return 2;
-  ar->top = m.top;
-  return 0;
+uint64_t arena_mark(const Arena* a) {
+  return a->top;
 }
 
-void arena_clear(Arena *ar) {
-  if (!ar) return;
-  ar->top = 0;
+Arena arena_reset_to_mark(Arena a, uint64_t mark) {
+  if (mark <= a.top) a.top = mark;
+  return a;
 }
 
-size_t arena_remaining(const Arena *ar) {
-  if (!ar) return 0;
-  if (ar->top >= ar->cap) return 0;
-  return ar->cap - ar->top;
+Arena arena_reset(Arena a) {
+  a.top = 0u;
+  return a;
 }

@@ -2,61 +2,60 @@ import Spec.Prelude
 
 namespace Spec.generated
 
-def alignUp (x a : Nat) : Nat :=
-  if a = 0 then x else ((x + (a - 1)) / a) * a
-
-/-- Power-of-two predicate.
-    We implement it via a finite fold over the low 64 bits.
-    (The harness only generates values within this range.) -/
-def isPow2 (x : Nat) : Bool :=
-  if x = 0 then false
-  else
-    let bits : List Nat := (List.range 64)
-    let step (acc : Nat) (i : Nat) : Nat :=
-      if x.testBit i then acc + 1 else acc
-    let ones := bits.foldl step 0
-    ones = 1
+def cacheLine : Nat := 64
 
 structure Arena where
-  cap : Nat
-  top : Nat
-  cacheLine : Nat
-  deriving Repr, DecidableEq
-
-structure Marker where
+  capacity : Nat
   top : Nat
   deriving Repr, DecidableEq
 
-def arenaInit (cap cacheLine : Nat) : Option Arena :=
-  if cap = 0 then none
-  else if cacheLine = 0 then none
-  else if isPow2 cacheLine then
-    some { cap := cap, top := 0, cacheLine := cacheLine }
-  else none
+structure AllocResult where
+  ok : Bool
+  offset : Nat
+  size : Nat
+  align : Nat
+  deriving Repr, DecidableEq
 
-def arenaAlloc (a : Arena) (n : Nat) : Option (Arena × Nat) :=
-  if n = 0 then none
-  else if a.cacheLine = 0 then none
-  else if isPow2 a.cacheLine then
-    let start := alignUp a.top a.cacheLine
-    if start > a.cap then none
-    else if n > a.cap - start then none
-    else
-      let a' : Arena := { a with top := start + n }
-      some (a', start)
-  else none
+def isPow2 (n : Nat) : Bool :=
+  n > 0 && (n &&& (n - 1) == 0)
 
-def arenaMark (a : Arena) : Marker :=
-  { top := a.top }
+/-- Align `x` up to alignment `a` (where `a` is a power of two and > 0).
+Implemented with division to avoid requiring bitwise complement on `Nat`. -/
+def alignUp (x a : Nat) : Nat :=
+  ((x + (a - 1)) / a) * a
 
-def arenaReset (a : Arena) (m : Marker) : Option Arena :=
-  if m.top > a.cap then none
-  else some { a with top := m.top }
+def arenaInit (capacity : Nat) : Arena :=
+  { capacity := capacity, top := 0 }
 
-def arenaClear (a : Arena) : Arena :=
-  { a with top := 0 }
+def arenaUsed (a : Arena) : Nat := a.top
 
 def arenaRemaining (a : Arena) : Nat :=
-  if a.top >= a.cap then 0 else a.cap - a.top
+  if a.top ≥ a.capacity then 0 else a.capacity - a.top
+
+def arenaAlloc (a : Arena) (size align : Nat) : Arena × AllocResult :=
+  let r0 : AllocResult := { ok := false, offset := 0, size := size, align := align }
+  if !isPow2 align then
+    (a, r0)
+  else
+    let alignedTop := alignUp a.top align
+    if alignedTop > a.capacity then
+      (a, r0)
+    else
+      let avail := a.capacity - alignedTop
+      if size > avail then
+        (a, r0)
+      else
+        let r : AllocResult := { r0 with ok := true, offset := alignedTop }
+        ({ a with top := alignedTop + size }, r)
+
+def arenaAllocCacheLine (a : Arena) (size : Nat) : Arena × AllocResult :=
+  arenaAlloc a size cacheLine
+
+def arenaMark (a : Arena) : Nat := a.top
+
+def arenaResetToMark (a : Arena) (mark : Nat) : Arena :=
+  if mark ≤ a.top then { a with top := mark } else a
+
+def arenaReset (a : Arena) : Arena := { a with top := 0 }
 
 end Spec.generated

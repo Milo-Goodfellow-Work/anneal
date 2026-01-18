@@ -3,84 +3,76 @@ import Spec.generated.Main
 
 namespace Spec.generated
 
-open Spec.generated
-
 private def parseNat (s : String) : Nat :=
-  match s.trim.toNat? with
+  match s.toNat? with
   | some n => n
   | none => 0
 
-private def splitWS (s : String) : List String :=
-  (s.trim.splitOn " ").filter (fun t => t ≠ "")
+private def words (s : String) : List String :=
+  (s.trim.splitOn " ").filter (fun w => w != "")
 
-/-- Read all lines until EOF by catching the end-of-file exception.
-    Implemented with `partial` since termination depends on IO. -/
-partial def readAllLines : IO (List String) := do
+private def readLineTrim (h : IO.FS.Stream) : IO (Option String) := do
+  let line ← h.getLine
+  if line.isEmpty then
+    return none
+  else
+    return some line.trim
+
+private def mainLoop (stdin : IO.FS.Stream) (steps : Nat) (i : Nat)
+    (a : Arena) : IO Unit := do
+  if i ≥ steps then
+    return ()
+  else
+    let lineOpt ← readLineTrim stdin
+    match lineOpt with
+    | none => return ()
+    | some line =>
+      let ws := words line
+      match ws with
+      | [] =>
+        mainLoop stdin steps (i+1) a
+      | op :: rest =>
+        match op with
+        | "A" =>
+          let size := parseNat (rest.getD 0 "0")
+          let align := parseNat (rest.getD 1 "0")
+          let (a', r) := arenaAlloc a size align
+          IO.println s!"{a'.top} {a'.capacity} {(if r.ok then 1 else 0)} {r.offset} {r.size} {r.align}"
+          mainLoop stdin steps (i+1) a'
+        | "C" =>
+          let size := parseNat (rest.getD 0 "0")
+          let (a', r) := arenaAllocCacheLine a size
+          IO.println s!"{a'.top} {a'.capacity} {(if r.ok then 1 else 0)} {r.offset} {r.size} {r.align}"
+          mainLoop stdin steps (i+1) a'
+        | "M" =>
+          let m := arenaMark a
+          IO.println s!"MARK {m}"
+          mainLoop stdin steps (i+1) a
+        | "R" =>
+          let m := parseNat (rest.getD 0 "0")
+          let a' := arenaResetToMark a m
+          IO.println s!"RESET {a'.top} {a'.capacity}"
+          mainLoop stdin steps (i+1) a'
+        | "Z" =>
+          let a' := arenaReset a
+          IO.println s!"ZERO {a'.top} {a'.capacity}"
+          mainLoop stdin steps (i+1) a'
+        | _ =>
+          mainLoop stdin steps (i+1) a
+
+def harnessMain : IO Unit := do
   let stdin ← IO.getStdin
-  let rec loop (acc : List String) : IO (List String) := do
-    try
-      let line ← stdin.getLine
-      loop (line :: acc)
-    catch _ =>
-      return acc.reverse
-  loop []
-
-private def run (lines : List String) : IO Unit := do
-  match lines with
-  | [] => pure ()
-  | header :: rest =>
-    let hs := splitWS header
-    let cap := parseNat (hs.getD 0 "0")
-    let cacheLine := parseNat (hs.getD 1 "0")
-    match arenaInit cap cacheLine with
-    | none =>
-      IO.println s!"INIT ERR 1"
-    | some a0 =>
-      let rec go (a : Arena) (marks : Array Marker) (ls : List String) : IO Unit := do
-        match ls with
-        | [] => pure ()
-        | l :: ls' =>
-          let parts := splitWS l
-          match parts.getD 0 "" with
-          | "A" =>
-            let n := parseNat (parts.getD 1 "0")
-            match arenaAlloc a n with
-            | none =>
-              IO.println s!"A FAIL top={a.top} rem={arenaRemaining a}"
-              go a marks ls'
-            | some (a', off) =>
-              IO.println s!"A OK off={off} top={a'.top} rem={arenaRemaining a'}"
-              go a' marks ls'
-          | "M" =>
-            let m := arenaMark a
-            let idx := marks.size
-            IO.println s!"M idx={idx} top={a.top}"
-            go a (marks.push m) ls'
-          | "R" =>
-            let idx := parseNat (parts.getD 1 "0")
-            if h : idx < marks.size then
-              let m := marks[idx]
-              match arenaReset a m with
-              | none =>
-                IO.println s!"R FAIL rc=2"
-                go a marks ls'
-              | some a' =>
-                IO.println s!"R OK idx={idx} top={a'.top} rem={arenaRemaining a'}"
-                go a' marks ls'
-            else
-              IO.println s!"R FAIL_BADIDX idx={idx}"
-              go a marks ls'
-          | "C" =>
-            let a' := arenaClear a
-            IO.println s!"C OK top={a'.top} rem={arenaRemaining a'}"
-            go a' marks ls'
-          | _ =>
-            go a marks ls'
-      go a0 #[] rest
+  let headerOpt ← readLineTrim stdin
+  match headerOpt with
+  | none => return ()
+  | some header =>
+    let ws := words header
+    let cap := parseNat (ws.getD 0 "0")
+    let steps := parseNat (ws.getD 1 "0")
+    let a := arenaInit cap
+    mainLoop stdin steps 0 a
 
 end Spec.generated
 
-/-- Entry point for differential testing. -/
-def main : IO Unit := do
-  let lines ← Spec.generated.readAllLines
-  Spec.generated.run lines
+/-- Entry point for the differential test runner. -/
+def main : IO Unit := Spec.generated.harnessMain

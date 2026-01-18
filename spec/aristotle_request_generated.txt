@@ -13,52 +13,61 @@ import Spec.Prelude
 
 namespace Spec.generated
 
-/-- Fixed capacity; must match C. -/
-def stackCapacity : Nat := 32
+def cacheLine : Nat := 64
 
-/-- Stack represented as a list (top at head). This is pure and total.
-Capacity is enforced by operations (list length never exceeds `stackCapacity`). -/
-structure Stack where
-  xs : List Int32
+structure Arena where
+  capacity : Nat
+  top : Nat
   deriving Repr, DecidableEq
 
-def stackEmpty : Stack := { xs := [] }
-
-def stackIsEmpty (s : Stack) : Bool := s.xs.isEmpty
-
-def stackIsFull (s : Stack) : Bool := s.xs.length ≥ stackCapacity
-
-structure StackRes where
-  stack : Stack
+structure AllocResult where
   ok : Bool
+  offset : Nat
+  size : Nat
+  align : Nat
   deriving Repr, DecidableEq
 
-structure StackPopRes where
-  stack : Stack
-  value : Int32
-  ok : Bool
-  deriving Repr, DecidableEq
+def isPow2 (n : Nat) : Bool :=
+  n > 0 && (n &&& (n - 1) == 0)
 
-structure StackPeekRes where
-  value : Int32
-  ok : Bool
-  deriving Repr, DecidableEq
+/-- Align `x` up to alignment `a` (where `a` is a power of two and > 0).
+Implemented with division to avoid requiring bitwise complement on `Nat`. -/
+def alignUp (x a : Nat) : Nat :=
+  ((x + (a - 1)) / a) * a
 
-def stackPush (s : Stack) (x : Int32) : StackRes :=
-  if s.xs.length < stackCapacity then
-    { stack := { xs := x :: s.xs }, ok := true }
+def arenaInit (capacity : Nat) : Arena :=
+  { capacity := capacity, top := 0 }
+
+def arenaUsed (a : Arena) : Nat := a.top
+
+def arenaRemaining (a : Arena) : Nat :=
+  if a.top ≥ a.capacity then 0 else a.capacity - a.top
+
+def arenaAlloc (a : Arena) (size align : Nat) : Arena × AllocResult :=
+  let r0 : AllocResult := { ok := false, offset := 0, size := size, align := align }
+  if !isPow2 align then
+    (a, r0)
   else
-    { stack := s, ok := false }
+    let alignedTop := alignUp a.top align
+    if alignedTop > a.capacity then
+      (a, r0)
+    else
+      let avail := a.capacity - alignedTop
+      if size > avail then
+        (a, r0)
+      else
+        let r : AllocResult := { r0 with ok := true, offset := alignedTop }
+        ({ a with top := alignedTop + size }, r)
 
-def stackPop (s : Stack) : StackPopRes :=
-  match s.xs with
-  | [] => { stack := s, value := 0, ok := false }
-  | y :: ys => { stack := { xs := ys }, value := y, ok := true }
+def arenaAllocCacheLine (a : Arena) (size : Nat) : Arena × AllocResult :=
+  arenaAlloc a size cacheLine
 
-def stackPeek (s : Stack) : StackPeekRes :=
-  match s.xs with
-  | [] => { value := 0, ok := false }
-  | y :: _ => { value := y, ok := true }
+def arenaMark (a : Arena) : Nat := a.top
+
+def arenaResetToMark (a : Arena) (mark : Nat) : Arena :=
+  if mark ≤ a.top then { a with top := mark } else a
+
+def arenaReset (a : Arena) : Arena := { a with top := 0 }
 
 end Spec.generated
 
