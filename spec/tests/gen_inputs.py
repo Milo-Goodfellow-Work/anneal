@@ -1,31 +1,39 @@
 import argparse
 import random
 
+# Text format:
+#   cap cacheLine steps\n
+# Each step is one line:
+#   A n        (alloc n bytes)
+#   M          (mark)
+#   R idx      (reset to marker index)
+#   C          (clear)
 
-def gen_case(rng: random.Random, n: int) -> str:
-    # Format:
-    # n\n
-    # then n lines each:
-    #   push X
-    #   pop
-    #   peek
-    #   isEmpty
-    #   isFull
-    ops = []
-    for _ in range(n):
-        k = rng.randint(0, 4)
-        if k == 0:
-            x = rng.randint(-2**31, 2**31 - 1)
-            ops.append(f"push {x}")
-        elif k == 1:
-            ops.append("pop")
-        elif k == 2:
-            ops.append("peek")
-        elif k == 3:
-            ops.append("isEmpty")
+
+def gen_one(rng: random.Random) -> str:
+    cap = rng.randint(1, 4096)
+    cache_line = 1 << rng.randint(0, 6)  # 1..64
+    steps = rng.randint(1, 200)
+
+    out = [f"{cap} {cache_line} {steps}\n"]
+    marks = 0
+    for _ in range(steps):
+        op = rng.choices(["A", "M", "R", "C"], weights=[70, 10, 10, 10])[0]
+        if op == "A":
+            n = rng.randint(0, 512)
+            out.append(f"A {n}\n")
+        elif op == "M":
+            out.append("M\n")
+            marks += 1
+        elif op == "R":
+            if marks == 0:
+                out.append("C\n")
+            else:
+                idx = rng.randint(0, marks - 1)
+                out.append(f"R {idx}\n")
         else:
-            ops.append("isFull")
-    return "{}\n{}\n".format(n, "\n".join(ops))
+            out.append("C\n")
+    return "".join(out)
 
 
 def main() -> None:
@@ -35,7 +43,11 @@ def main() -> None:
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    print(gen_case(rng, args.n), end="")
+    # Differential framework expects exactly one test case per invocation.
+    # We ignore --n except to advance RNG deterministically.
+    for _ in range(max(0, args.n - 1)):
+        _ = gen_one(rng)
+    print(gen_one(rng), end="")
 
 
 if __name__ == "__main__":
