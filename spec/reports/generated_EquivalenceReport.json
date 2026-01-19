@@ -4,32 +4,32 @@
   "required_runs": 5,
   "runs": [
     {
-      "cases": 147,
+      "cases": 6,
       "seed": 1,
       "status": "pass"
     },
     {
-      "cases": 25,
+      "cases": 6,
       "seed": 2,
       "status": "pass"
     },
     {
-      "cases": 153,
+      "cases": 6,
       "seed": 3,
       "status": "pass"
     },
     {
-      "cases": 79,
+      "cases": 6,
       "seed": 4,
       "status": "pass"
     },
     {
-      "cases": 191,
+      "cases": 6,
       "seed": 5,
       "status": "pass"
     }
   ],
-  "saved_at_unix": 1768731838,
+  "saved_at_unix": 1768845912,
   "status": "success",
-  "total_time_s": 229.331
+  "total_time_s": 96.219
 }

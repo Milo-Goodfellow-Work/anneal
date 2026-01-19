@@ -245,10 +245,65 @@ def base_instructions_prompt_cogen(ctx: dict) -> str:
         "6. Fix any mismatches until tests pass\n"
         "7. Call submit_stage when complete\n\n"
         
+        "═══════════════════════════════════════════════════════════════\n"
+        "                  PERFORMANCE GUIDELINES\n"
+        "═══════════════════════════════════════════════════════════════\n\n"
+        
+        "Generate code that can handle BILLIONS of operations per second.\n"
+        "These patterns apply across all target languages.\n\n"
+        
+        "1. INLINE HOT-PATH FUNCTIONS\n"
+        "   - Small functions called frequently MUST be inlineable\n"
+        "   - C: Use 'static inline' in headers for hot functions\n"
+        "   - Rust: Use #[inline] or #[inline(always)] for hot paths\n"
+        "   - If a function might be called billions of times, inline it\n\n"
+        
+        "2. AVOID DIVISION FOR ALIGNMENT\n"
+        "   - WRONG: ((x + (a-1)) / a) * a   // division is slow\n"
+        "   - RIGHT: (x + (a-1)) & ~(a-1)    // bitwise for power-of-2\n"
+        "   - When alignment is power-of-2, ALWAYS use bitwise AND\n\n"
+        
+        "3. MINIMIZE STRUCT OVERHEAD ON HOT PATHS\n"
+        "   - Return primitives instead of structs where possible\n"
+        "   - Use out-parameters instead of returning result structs\n"
+        "   - Keep hot-path data in registers, not memory\n\n"
+        
+        "4. PREFER BRANCHLESS CODE\n"
+        "   - Branches cause pipeline stalls\n"
+        "   - Use arithmetic: x = a + (b-a) * cond\n"
+        "   - Use ternary operators which compile to cmov\n\n"
+        
+        "5. HOT PATH FIRST\n"
+        "   - Put the common case as the if-branch, rare case as else\n"
+        "   - Early return on error, fall through on success\n"
+        "   - Reduces branch misprediction\n\n"
+        
+        "6. CACHE-FRIENDLY DATA LAYOUT\n"
+        "   - Keep frequently accessed fields together\n"
+        "   - Align to cache lines (64 bytes) for hot data\n"
+        "   - Avoid pointer chasing; prefer contiguous arrays\n\n"
+        
+        "7. LANGUAGE-SPECIFIC OPTIMIZATIONS\n"
+        "   C:\n"
+        "   - 'static inline' for all small functions in headers\n"
+        "   - 'restrict' keyword for non-aliasing pointers\n"
+        "   - '__builtin_expect' for branch prediction hints\n"
+        "   Rust:\n"
+        "   - #[inline(always)] for critical paths\n"
+        "   - Avoid unnecessary bounds checks with get_unchecked\n"
+        "   - Use iterators over manual indexing\n\n"
+        
+        "GOAL: A bump allocator should do 1+ billion allocs/sec.\n"
+        "If your design can't achieve this, restructure it.\n\n"
+        
+        "═══════════════════════════════════════════════════════════════\n\n"
+        
         "ANTI-PATTERNS TO AVOID:\n"
         "- Hallucinating function names (always read your files)\n"
         "- Using non-existent Lean 4 IO APIs\n"
         "- Global mutable state\n"
         "- Pointer arithmetic without bounds\n"
+        "- Division when bitwise AND would work\n"
+        "- Non-inlined functions on hot paths\n"
     )
 

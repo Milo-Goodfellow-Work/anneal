@@ -2,60 +2,54 @@ import Spec.Prelude
 
 namespace Spec.generated
 
+/-- Cache line size used for alignment. -/
 def cacheLine : Nat := 64
 
+/-- Align `n` up to the next multiple of `a`.
+
+This is defined for all `a`; callers should use power-of-two `a` (we use 64).
+Uses arithmetic (division) to avoid needing bitwise complement on `Nat`.
+-/
+@[inline] def alignUp (n a : Nat) : Nat :=
+  if a = 0 then n else ((n + (a - 1)) / a) * a
+
+/-- A simple stack-based arena model. `cap` is total bytes.
+`top` is current allocation offset. `marks` is a stack of saved `top` values.
+
+This Lean model is purely functional; the C side will use mutable arrays.
+-/
 structure Arena where
-  capacity : Nat
-  top : Nat
-  deriving Repr, DecidableEq
+  cap   : Nat
+  top   : Nat
+  marks : List Nat
+  deriving Repr, BEq
 
-structure AllocResult where
-  ok : Bool
-  offset : Nat
-  size : Nat
-  align : Nat
-  deriving Repr, DecidableEq
+@[inline] def Arena.init (cap : Nat) : Arena :=
+  { cap := cap, top := 0, marks := [] }
 
-def isPow2 (n : Nat) : Bool :=
-  n > 0 && (n &&& (n - 1) == 0)
+@[inline] def Arena.push (a : Arena) : Arena :=
+  { a with marks := a.top :: a.marks }
 
-/-- Align `x` up to alignment `a` (where `a` is a power of two and > 0).
-Implemented with division to avoid requiring bitwise complement on `Nat`. -/
-def alignUp (x a : Nat) : Nat :=
-  ((x + (a - 1)) / a) * a
+@[inline] def Arena.pop (a : Arena) : Arena :=
+  match a.marks with
+  | [] => a
+  | m :: ms => { a with top := m, marks := ms }
 
-def arenaInit (capacity : Nat) : Arena :=
-  { capacity := capacity, top := 0 }
+@[inline] def Arena.reset (a : Arena) : Arena :=
+  { a with top := 0, marks := [] }
 
-def arenaUsed (a : Arena) : Nat := a.top
-
-def arenaRemaining (a : Arena) : Nat :=
-  if a.top ≥ a.capacity then 0 else a.capacity - a.top
-
-def arenaAlloc (a : Arena) (size align : Nat) : Arena × AllocResult :=
-  let r0 : AllocResult := { ok := false, offset := 0, size := size, align := align }
-  if !isPow2 align then
-    (a, r0)
+/-- Allocate `n` bytes aligned to cache line.
+Returns `(newArena, ok, offset)` where `offset` is start position if ok else 0.
+-/
+@[inline] def Arena.alloc (a : Arena) (n : Nat) : Arena × Bool × Nat :=
+  let start := alignUp a.top cacheLine
+  let newTop := start + n
+  if newTop ≤ a.cap then
+    ({ a with top := newTop }, true, start)
   else
-    let alignedTop := alignUp a.top align
-    if alignedTop > a.capacity then
-      (a, r0)
-    else
-      let avail := a.capacity - alignedTop
-      if size > avail then
-        (a, r0)
-      else
-        let r : AllocResult := { r0 with ok := true, offset := alignedTop }
-        ({ a with top := alignedTop + size }, r)
+    (a, false, 0)
 
-def arenaAllocCacheLine (a : Arena) (size : Nat) : Arena × AllocResult :=
-  arenaAlloc a size cacheLine
-
-def arenaMark (a : Arena) : Nat := a.top
-
-def arenaResetToMark (a : Arena) (mark : Nat) : Arena :=
-  if mark ≤ a.top then { a with top := mark } else a
-
-def arenaReset (a : Arena) : Arena := { a with top := 0 }
+@[inline] def Arena.remaining (a : Arena) : Nat :=
+  if a.top ≤ a.cap then a.cap - a.top else 0
 
 end Spec.generated

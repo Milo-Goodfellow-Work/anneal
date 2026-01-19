@@ -8,71 +8,59 @@ private def parseNat (s : String) : Nat :=
   | some n => n
   | none => 0
 
-private def words (s : String) : List String :=
-  (s.trim.splitOn " ").filter (fun w => w != "")
+private def tokens (line : String) : List String :=
+  line.trim.splitOn " " |>.filter (fun t => t ≠ "")
 
-private def readLineTrim (h : IO.FS.Stream) : IO (Option String) := do
-  let line ← h.getLine
-  if line.isEmpty then
-    return none
+partial def loop (stdin : IO.FS.Stream) (n : Nat) (a : Arena) : IO Unit := do
+  if n = 0 then
+    pure ()
   else
-    return some line.trim
-
-private def mainLoop (stdin : IO.FS.Stream) (steps : Nat) (i : Nat)
-    (a : Arena) : IO Unit := do
-  if i ≥ steps then
-    return ()
-  else
-    let lineOpt ← readLineTrim stdin
-    match lineOpt with
-    | none => return ()
-    | some line =>
-      let ws := words line
-      match ws with
-      | [] =>
-        mainLoop stdin steps (i+1) a
+    let line ← stdin.getLine
+    if line.isEmpty then
+      pure ()
+    else
+      let ts := tokens line
+      match ts with
+      | [] => loop stdin (n-1) a
       | op :: rest =>
-        match op with
-        | "A" =>
-          let size := parseNat (rest.getD 0 "0")
-          let align := parseNat (rest.getD 1 "0")
-          let (a', r) := arenaAlloc a size align
-          IO.println s!"{a'.top} {a'.capacity} {(if r.ok then 1 else 0)} {r.offset} {r.size} {r.align}"
-          mainLoop stdin steps (i+1) a'
-        | "C" =>
-          let size := parseNat (rest.getD 0 "0")
-          let (a', r) := arenaAllocCacheLine a size
-          IO.println s!"{a'.top} {a'.capacity} {(if r.ok then 1 else 0)} {r.offset} {r.size} {r.align}"
-          mainLoop stdin steps (i+1) a'
-        | "M" =>
-          let m := arenaMark a
-          IO.println s!"MARK {m}"
-          mainLoop stdin steps (i+1) a
-        | "R" =>
-          let m := parseNat (rest.getD 0 "0")
-          let a' := arenaResetToMark a m
-          IO.println s!"RESET {a'.top} {a'.capacity}"
-          mainLoop stdin steps (i+1) a'
-        | "Z" =>
-          let a' := arenaReset a
-          IO.println s!"ZERO {a'.top} {a'.capacity}"
-          mainLoop stdin steps (i+1) a'
+        match op.get 0 with
+        | 'a' =>
+          let bytes :=
+            match rest with
+            | b :: _ => parseNat b
+            | _ => 0
+          let (a', ok, off) := Arena.alloc a bytes
+          IO.println s!"A {(if ok then 1 else 0)} {off} {a'.top}"
+          loop stdin (n-1) a'
+        | 'p' =>
+          let a' := Arena.push a
+          IO.println s!"P {a'.top} {a'.marks.length}"
+          loop stdin (n-1) a'
+        | 'o' =>
+          let a' := Arena.pop a
+          IO.println s!"O {a'.top} {a'.marks.length}"
+          loop stdin (n-1) a'
+        | 'r' =>
+          let a' := Arena.reset a
+          IO.println s!"R {a'.top} {a'.marks.length}"
+          loop stdin (n-1) a'
         | _ =>
-          mainLoop stdin steps (i+1) a
+          loop stdin (n-1) a
 
+/-- Entry point for the Lean differential harness. -/
 def harnessMain : IO Unit := do
   let stdin ← IO.getStdin
-  let headerOpt ← readLineTrim stdin
-  match headerOpt with
-  | none => return ()
-  | some header =>
-    let ws := words header
-    let cap := parseNat (ws.getD 0 "0")
-    let steps := parseNat (ws.getD 1 "0")
-    let a := arenaInit cap
-    mainLoop stdin steps 0 a
+  let header ← stdin.getLine
+  if header.isEmpty then
+    pure ()
+  else
+    let ts := tokens header
+    let cap := match ts with | c :: _ => parseNat c | _ => 0
+    let steps := match ts with | _ :: s :: _ => parseNat s | _ => 0
+    let a := Arena.init cap
+    loop stdin steps a
 
 end Spec.generated
 
-/-- Entry point for the differential test runner. -/
+/-- The evaluator looks for a top-level `main`. -/
 def main : IO Unit := Spec.generated.harnessMain
