@@ -16,7 +16,7 @@ with integrated differential testing to ensure semantic equivalence.
 **Test Results:**
 - Passed Runs: 5/5
 - Minimum Cases per Run: 5
-- Total Test Time: 96.22s
+- Total Test Time: 91.36s
 
 ### Stage 2: Formal Specification and Proof
 

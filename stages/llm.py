@@ -2,13 +2,15 @@
 Anneal Stages - Shared LLM and tool execution functions.
 
 This module contains the procedural functions for interacting with the
-OpenAI API and executing tool calls.
+Google Gemini API and executing tool calls.
 """
 from __future__ import annotations
 import json
 import time
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
+
+from google.genai import types
 
 from helpers import (
     log, trunc, _safe_relpath, _read_text_file, _write_text_file,
@@ -25,9 +27,33 @@ class RestartTranslationError(Exception):
         super().__init__(reason)
 
 
-def tool_output_item(call_id: str, out: str) -> Dict[str, Any]:
+def _convert_tools_to_gemini() -> types.Tool:
+    """Convert TOOLS_SCHEMA to Gemini FunctionDeclaration format."""
+    declarations = []
+    for tool in TOOLS_SCHEMA:
+        decl = types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool["description"],
+            parameters_json_schema=tool["parameters"],
+        )
+        declarations.append(decl)
+    return types.Tool(function_declarations=declarations)
+
+
+# Cached Gemini tools - convert once
+_GEMINI_TOOLS = None
+
+def get_gemini_tools() -> types.Tool:
+    """Get the Gemini-formatted tools (cached)."""
+    global _GEMINI_TOOLS
+    if _GEMINI_TOOLS is None:
+        _GEMINI_TOOLS = _convert_tools_to_gemini()
+    return _GEMINI_TOOLS
+
+
+def tool_output_item(call_id: str, out: str, name: str = "unknown") -> Dict[str, Any]:
     """Create a tool output item for the API."""
-    return {"type": "function_call_output", "call_id": call_id, "output": out}
+    return {"call_id": call_id, "output": out, "name": name, "type": "function_call_output"}
 
 
 def responses_create(
@@ -39,19 +65,62 @@ def responses_create(
     tool_choice: Optional[Any] = None,
     parallel_tool_calls: bool = False,
 ):
-    """Create a response from the OpenAI API."""
-    kwargs: Dict[str, Any] = {
-        "model": MODEL_ID,
-        "instructions": instructions,
-        "input": input_data,
-        "tools": TOOLS_SCHEMA,
-        "parallel_tool_calls": parallel_tool_calls,
-    }
-    if previous_response_id:
-        kwargs["previous_response_id"] = previous_response_id
-    if tool_choice is not None:
-        kwargs["tool_choice"] = tool_choice
-    return ctx["client"].responses.create(**kwargs)
+    """Create a response from the Gemini API.
+    
+    Args:
+        ctx: Context with 'client' (Gemini client) and 'chat' (optional Chat session)
+        instructions: System instructions for the model
+        input_data: Either a string prompt or list of content items (for multi-turn)
+        previous_response_id: Unused (Gemini uses Chat sessions instead)
+        tool_choice: Unused (Gemini has different mechanism)
+        parallel_tool_calls: Unused
+    """
+    # Build the contents
+    if isinstance(input_data, str):
+        contents = input_data
+    elif isinstance(input_data, list):
+        # Convert from OpenAI format to Gemini format
+        contents = []
+        for item in input_data:
+            if isinstance(item, str):
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=item)]))
+            elif isinstance(item, dict):
+                item_type = item.get("type", "")
+                if item_type == "function_call_output":
+                    # Tool response
+                    contents.append(types.Content(
+                        role="tool",
+                        parts=[types.Part.from_function_response(
+                            name=item.get("name", "unknown"),
+                            response={"result": item.get("output", "")},
+                        )]
+                    ))
+                elif "role" in item:
+                    # Standard message
+                    role = "user" if item["role"] == "user" else "model"
+                    text = item.get("content", "") or item.get("text", "")
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+            else:
+                # Assume it's already a Content object
+                contents.append(item)
+    else:
+        contents = str(input_data)
+    
+    # Configure the request
+    config = types.GenerateContentConfig(
+        system_instruction=instructions,
+        tools=[get_gemini_tools()],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    
+    # Make the request
+    response = ctx["client"].models.generate_content(
+        model=MODEL_ID,
+        contents=contents,
+        config=config,
+    )
+    
+    return response
 
 
 def persist_equiv_report_if_success(ctx: dict) -> None:
@@ -153,12 +222,24 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
     Returns (function_call_output_item, success_flag).
     
     run_differential_test_impl is passed in to avoid circular imports.
+    
+    Note: Gemini FunctionCall has .name and .args (dict).
+    OpenAI had .call_id and .arguments (JSON string).
     """
     fname = item.name
-    call_id = item.call_id
-    try:
-        args = json.loads(item.arguments) if item.arguments else {}
-    except json.JSONDecodeError:
+    # Gemini doesn't have call_id, generate one
+    call_id = getattr(item, 'call_id', None) or f"call_{fname}_{id(item)}"
+    
+    # Gemini uses .args as a dict directly
+    if hasattr(item, 'args') and isinstance(item.args, dict):
+        args = item.args
+    elif hasattr(item, 'arguments'):
+        # OpenAI format fallback
+        try:
+            args = json.loads(item.arguments) if item.arguments else {}
+        except json.JSONDecodeError:
+            args = {}
+    else:
         args = {}
 
     # Log args (hide content)

@@ -1,5 +1,5 @@
 /*
- * Arena allocator benchmark - new optimized version
+ * Arena allocator benchmark - Gemini-generated version
  * 
  * Compile: gcc -O3 -march=native -o arena_bench arena_bench.c arena.c
  * Run: ./arena_bench
@@ -14,7 +14,6 @@
 #define ARENA_SIZE (1ULL << 30)  /* 1 GB */
 #define NUM_ITERATIONS 1000000000ULL  /* 1 billion */
 #define ALLOC_SIZE 64  /* bytes per allocation */
-#define MARKS_CAP 1024
 
 static inline double time_diff_sec(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) +
@@ -26,32 +25,26 @@ int main(void) {
     
     clock_gettime(CLOCK_MONOTONIC, &t_start);
     
-    printf("=== Arena Allocator Benchmark (Optimized) ===\n");
+    printf("=== Arena Allocator Benchmark (Gemini) ===\n");
     printf("Arena size: %.2f GB\n", ARENA_SIZE / (1024.0 * 1024 * 1024));
     printf("Iterations: %.2f billion\n", NUM_ITERATIONS / 1e9);
     printf("Alloc size: %d bytes (cache-line aligned)\n\n", ALLOC_SIZE);
     
     /* Single malloc for backing memory */
     printf("Allocating backing memory...\n");
-    void* backing = malloc(ARENA_SIZE);
+    uint8_t* backing = (uint8_t*)malloc(ARENA_SIZE);
     if (!backing) {
         fprintf(stderr, "Failed to allocate backing memory\n");
         return 1;
     }
     
-    size_t marks[MARKS_CAP];
-    arena_t arena;
-    
-    if (!arena_init(&arena, backing, ARENA_SIZE, marks, MARKS_CAP)) {
-        fprintf(stderr, "Failed to init arena\n");
-        return 1;
-    }
+    Arena arena;
+    Arena_Init(&arena, backing, ARENA_SIZE);
     
     /* How many allocations fit in the arena? */
     size_t allocs_per_batch = ARENA_SIZE / ALLOC_SIZE;
     size_t total_allocs = 0;
     size_t total_resets = 0;
-    size_t out_off;
     
     printf("Starting ops timer...\n\n");
     
@@ -62,12 +55,13 @@ int main(void) {
         /* Allocate until full */
         size_t batch = 0;
         while (batch < allocs_per_batch && total_allocs < NUM_ITERATIONS) {
-            if (!arena_alloc(&arena, ALLOC_SIZE, &out_off)) break;
+            size_t off = Arena_Alloc(&arena, ALLOC_SIZE);
+            if (off == SIZE_MAX) break;
             batch++;
             total_allocs++;
         }
         /* Reset */
-        arena_reset(&arena);
+        Arena_Reset(&arena);
         total_resets++;
     }
     

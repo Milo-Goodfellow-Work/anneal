@@ -23,7 +23,7 @@ SPEC_DIR = Path("spec").resolve()
 SPEC_SRC_DIR = SPEC_DIR / "Spec"
 EXAMPLES_DIR = Path("examples").resolve()
 
-MODEL_ID = "gpt-5.2"
+MODEL_ID = "gemini-3-pro-preview"
 
 PRINT_TRUNC = 4000
 MAX_TOOL_READ_CHARS = 80_000
@@ -337,16 +337,14 @@ def ensure_prelude_and_lockdown() -> None:
 # ============================================================
 
 def _tool(name: str, description: str, properties: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
+    """Create a tool schema that can be converted to Gemini format."""
     return {
-        "type": "function",
         "name": name,
         "description": description,
-        "strict": True,
         "parameters": {
             "type": "object",
             "properties": properties,
             "required": required,
-            "additionalProperties": False,
         },
     }
 

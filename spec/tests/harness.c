@@ -1,49 +1,48 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "arena.h"
 
-#include "../../generated/generated/arena.h"
+int main() {
+    char line[256];
+    Arena arena = {0};
+    uint8_t* buffer = NULL;
 
-int main(void) {
-  size_t cap = 0, steps = 0;
-  if (scanf("%zu %zu", &cap, &steps) != 2) return 1;
+    while (fgets(line, sizeof(line), stdin)) {
+        // Remove trailing newline
+        line[strcspn(line, "\n")] = 0;
+        
+        if (line[0] == 0) continue;
 
-  void *buf = NULL;
-  if (cap > 0) {
-    buf = aligned_alloc(ARENA_CACHELINE, (cap + ARENA_CACHELINE - 1u) & ~(ARENA_CACHELINE - 1u));
-    if (!buf) return 2;
-  } else {
-    buf = aligned_alloc(ARENA_CACHELINE, ARENA_CACHELINE);
-    if (!buf) return 2;
-  }
+        char cmd[32];
+        size_t arg = 0;
+        // Check input format
+        int items = sscanf(line, "%s %zu", cmd, &arg);
 
-  size_t marks_storage[4096];
-  arena_t a;
-  if (!arena_init(&a, buf, cap, marks_storage, 4096)) return 3;
-
-  for (size_t i = 0; i < steps; i++) {
-    char op[2] = {0};
-    if (scanf(" %1s", op) != 1) return 4;
-    if (op[0] == 'a') {
-      size_t n;
-      if (scanf("%zu", &n) != 1) return 5;
-      size_t off = 0;
-      bool ok = arena_alloc(&a, n, &off);
-      printf("A %d %zu %zu\n", ok ? 1 : 0, off, a.top);
-    } else if (op[0] == 'p') {
-      arena_push(&a);
-      printf("P %zu %zu\n", a.top, a.marks_len);
-    } else if (op[0] == 'o') {
-      arena_pop(&a);
-      printf("O %zu %zu\n", a.top, a.marks_len);
-    } else if (op[0] == 'r') {
-      arena_reset(&a);
-      printf("R %zu %zu\n", a.top, a.marks_len);
-    } else {
-      return 6;
+        if (strcmp(cmd, "init") == 0) {
+            if (buffer) free(buffer);
+            buffer = malloc(arg);
+            Arena_Init(&arena, buffer, arg);
+            printf("init ok\n");
+        } else if (strcmp(cmd, "alloc") == 0) {
+            size_t res = Arena_Alloc(&arena, arg);
+            if (res == SIZE_MAX) {
+                printf("alloc fail\n");
+            } else {
+                printf("alloc %zu\n", res);
+            }
+        } else if (strcmp(cmd, "getpos") == 0) {
+            size_t pos = Arena_GetPos(&arena);
+            printf("pos %zu\n", pos);
+        } else if (strcmp(cmd, "setpos") == 0) {
+            Arena_SetPos(&arena, arg);
+            printf("setpos ok\n");
+        } else if (strcmp(cmd, "reset") == 0) {
+            Arena_Reset(&arena);
+            printf("reset ok\n");
+        }
     }
-  }
 
-  free(buf);
-  return 0;
+    if (buffer) free(buffer);
+    return 0;
 }

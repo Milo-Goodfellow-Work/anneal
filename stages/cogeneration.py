@@ -33,55 +33,83 @@ def _session_cogeneration(
     1. Code is generated in both languages
     2. Differential tests pass robustly (5 runs x 5 cases)
     """
-    previous_response_id: Optional[str] = None
-    current_input: Any = user_payload
+    from google.genai import types
+    
+    # Build initial conversation history
+    conversation_history: List[types.Content] = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_payload)]
+        )
+    ]
 
     for turn in range(max_turns):
         log(f"[CoGen] Turn {turn+1}/{max_turns}")
         resp = responses_create(
             ctx,
             instructions=instructions,
-            input_data=current_input,
-            previous_response_id=previous_response_id,
-            tool_choice=None,
-            parallel_tool_calls=False,
+            input_data=conversation_history,
         )
-        previous_response_id = resp.id
-
-        # Extract tool calls from response
+        
+        # Extract the model's response content (includes any function calls)
+        model_content = None
+        if hasattr(resp, 'candidates') and resp.candidates:
+            model_content = resp.candidates[0].content
+        
+        # Log any text output
+        if hasattr(resp, 'text') and resp.text:
+            log(f"Model: {trunc(resp.text, 800)}")
+        
+        # Get function calls
         tool_calls = []
-        if getattr(resp, "output", None):
-            for item in resp.output:
-                if item.type == "message":
-                    for part in item.content:
-                        if part.type == "output_text":
-                            log(f"Model: {trunc(part.text, 800)}")
-                elif item.type == "function_call":
-                    tool_calls.append(item)
+        if hasattr(resp, 'function_calls') and resp.function_calls:
+            for fc in resp.function_calls:
+                tool_calls.append(fc)
 
         if not tool_calls:
-            current_input = (
-                "NO TOOL CALLS DETECTED.\n"
-                "You MUST call tools to make progress.\n"
-                "Next steps:\n"
-                "1. Write implementation code\n"
-                "2. Write Lean definitions\n"
-                "3. Update test harnesses\n"
-                "4. Run differential tests\n"
-                "5. Call submit_stage when tests pass robustly\n"
-            )
+            # No tool calls - add model response and prompt for tools
+            if model_content:
+                conversation_history.append(model_content)
+            conversation_history.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=(
+                    "NO TOOL CALLS DETECTED.\n"
+                    "You MUST call tools to make progress.\n"
+                    "Next steps:\n"
+                    "1. Write implementation code\n"
+                    "2. Write Lean definitions\n"
+                    "3. Update test harnesses\n"
+                    "4. Run differential tests\n"
+                    "5. Call submit_stage when tests pass robustly\n"
+                ))]
+            ))
             continue
 
-        tool_outputs: List[Dict[str, Any]] = []
+        # Add model's response (with function calls) to history
+        if model_content:
+            conversation_history.append(model_content)
+        
+        # Execute tools and build function response parts
+        function_response_parts: List[types.Part] = []
         submit_ok = False
 
         for call in tool_calls:
             out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
-            tool_outputs.append(out_item)
+            # Create function response part
+            function_response_parts.append(
+                types.Part.from_function_response(
+                    name=call.name,
+                    response={"result": out_item.get("output", "")},
+                )
+            )
             if call.name == "submit_stage" and ok:
                 submit_ok = True
 
-        current_input = tool_outputs
+        # Add all function responses as a single "tool" turn (required by Gemini)
+        conversation_history.append(types.Content(
+            role="tool",
+            parts=function_response_parts
+        ))
 
         if submit_ok:
             return True

@@ -19,7 +19,7 @@ Usage:
 import argparse
 from pathlib import Path
 
-from openai import OpenAI
+from google import genai
 
 from helpers import (
     log, load_secrets, ensure_prelude_and_lockdown,
@@ -212,7 +212,7 @@ def main() -> None:
     
     args = parse_args()
     secrets = load_secrets()
-    client = OpenAI(api_key=secrets["secrets"]["OPENAI_API_KEY"])
+    client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
 
     if args.legacy:
         run_legacy_mode(client, secrets)
