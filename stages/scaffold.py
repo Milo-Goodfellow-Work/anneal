@@ -27,9 +27,8 @@ def create_project_from_prompt(ctx: dict) -> None:
     ensure_prelude_and_lockdown()
     
     project_name = ctx["name"]
-    language = ctx.get("language", "c")
     
-    log(f"Creating prompt-driven project scaffold: {project_name} ({language})")
+    log(f"Creating prompt-driven project scaffold: {project_name} (C)")
     
     # Create directories
     SPEC_TESTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,10 +36,8 @@ def create_project_from_prompt(ctx: dict) -> None:
     ctx["spec_project_root"].mkdir(parents=True, exist_ok=True)
     ctx["source_root"].mkdir(parents=True, exist_ok=True)
     
-    # Set up writable paths for generated code
-    # Implementation files (dynamic - model creates as needed)
-    impl_ext = {"c": [".c", ".h"], "python": [".py"], "rust": [".rs"]}
-    ctx["impl_extensions"] = impl_ext.get(language, [".c", ".h"])
+    # Set up writable paths for generated code (C only)
+    ctx["impl_extensions"] = [".c", ".h"]
     
     # Lean files the model can create
     main_lean = f"{project_name}/Main.lean"

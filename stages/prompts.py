@@ -159,13 +159,12 @@ def base_instructions_cogen(ctx: dict) -> str:
 
 
 def base_instructions_prompt_cogen(ctx: dict) -> str:
-    """Generate instructions for Stage 1: Prompt-driven Co-Generation."""
-    language = ctx.get("language", "c").upper()
+    """Generate instructions for Stage 1: Prompt-driven Co-Generation (C only)."""
     prompt = ctx.get("prompt", "")
     
     return (
         "ROLE: You are Anneal's Co-Generation Engine - an expert engineer who SIMULTANEOUSLY generates "
-        f"a {language} implementation AND its Lean 4 equivalent from a natural language specification.\n\n"
+        "a C implementation AND its Lean 4 equivalent from a natural language specification.\n\n"
         "SETTING: SAFETY-CRITICAL. Correctness is mandatory. No placeholders, no stubs, no shortcuts.\n\n"
         
         "═══════════════════════════════════════════════════════════════\n"
@@ -216,7 +215,6 @@ def base_instructions_prompt_cogen(ctx: dict) -> str:
         "═══════════════════════════════════════════════════════════════\n\n"
         
         f"PROJECT: {ctx['name']}\n"
-        f"TARGET LANGUAGE: {language}\n"
         f"IMPLEMENTATION DIR: {ctx['source_root']}\n"
         f"LEAN DIR: {ctx['spec_src_root']}/{ctx['name']}/\n\n"
         
@@ -230,10 +228,10 @@ def base_instructions_prompt_cogen(ctx: dict) -> str:
         f"Generate code based on this specification:\n\n{prompt}\n\n"
         
         "DELIVERABLES:\n"
-        f"1. {language} implementation files in {ctx['source_root']}/\n"
+        f"1. C implementation files in {ctx['source_root']}/\n"
         f"2. Equivalent Lean 4 definitions in spec/Spec/{ctx['name']}/Main.lean\n"
         "3. Test input generator: spec/tests/gen_inputs.py\n"
-        f"4. {language} test harness: spec/tests/harness.c (or .py/.rs)\n"
+        "4. C test harness: spec/tests/harness.c\n"
         "5. Lean test harness: spec/Spec/tests/Harness.lean\n\n"
         
         "PROCESS:\n"

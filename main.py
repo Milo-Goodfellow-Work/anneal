@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """
-Anneal - Universal Verification Agent (v2.1 - Prompt-Driven)
+Anneal - Universal Verification Agent (v3.0)
 
-Generates verified code from natural language prompts:
-  Stage 1: Co-Generation - Generate Implementation + Lean + Differential Tests
+Generates verified C code from natural language prompts:
+  Stage 1: Co-Generation - Generate C Implementation + Lean + Differential Tests
   Stage 2: Proving - Specification + Proof via Aristotle
 
 Usage:
-  # Prompt-driven generation (new)
-  python main.py --prompt "Create an order book matching engine" --language c
-  
-  # From prompt file
-  python main.py --prompt-file task.md --project myproject
-  
-  # Legacy: translate existing code from examples/
-  python main.py --legacy
+  python main.py --prompt "Create a memory arena"
+  python main.py --project generated --prove-only
 """
 import argparse
 from pathlib import Path
@@ -23,12 +17,12 @@ from google import genai
 
 from helpers import (
     log, load_secrets, ensure_prelude_and_lockdown,
-    SPEC_DIR, SPEC_SRC_DIR, EXAMPLES_DIR,
+    SPEC_DIR, SPEC_SRC_DIR,
     DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
     LOCKED_LEAN_FILENAMES,
 )
 
-from stages.scaffold import autogen_scaffold_and_lockdown, create_project_from_prompt
+from stages.scaffold import create_project_from_prompt
 from stages.cogeneration import run_stage_cogeneration
 from stages.proving import run_stage_proving
 
@@ -42,25 +36,11 @@ def parse_args():
         help="Natural language description of what to build"
     )
     parser.add_argument(
-        "--prompt-file", "-f",
-        help="File containing the prompt (markdown supported)"
-    )
-    parser.add_argument(
         "--project", "-n",
         default="generated",
         help="Project name (default: generated)"
     )
-    parser.add_argument(
-        "--language", "-l",
-        default="c",
-        choices=["c", "python", "rust"],
-        help="Target implementation language (default: c)"
-    )
-    parser.add_argument(
-        "--legacy",
-        action="store_true",
-        help="Legacy mode: translate from examples/ directory"
-    )
+
     parser.add_argument(
         "--prove-only",
         action="store_true",
@@ -69,8 +49,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_context(client, secrets, project_name: str, prompt: str, language: str) -> dict:
-    """Create context for prompt-driven generation."""
+def create_context(client, secrets, project_name: str, prompt: str) -> dict:
+    """Create context for prompt-driven generation (C only)."""
     spec_project_root = SPEC_SRC_DIR / project_name
     spec_project_root.mkdir(parents=True, exist_ok=True)
     
@@ -81,7 +61,6 @@ def create_context(client, secrets, project_name: str, prompt: str, language: st
     return {
         "name": project_name,
         "prompt": prompt,
-        "language": language,
         "source_root": impl_root,  # Where generated impl goes
         "spec_pkg_root": SPEC_DIR,
         "spec_src_root": SPEC_SRC_DIR,
@@ -112,24 +91,16 @@ def create_context(client, secrets, project_name: str, prompt: str, language: st
 
 def run_prompt_mode(args, client, secrets):
     """Run in prompt-driven generation mode."""
-    # Get prompt
-    if args.prompt_file:
-        prompt = Path(args.prompt_file).read_text()
-        log(f"Loaded prompt from {args.prompt_file}")
-    elif args.prompt:
-        prompt = args.prompt
-    else:
-        prompt = "(no prompt - proving only)"
+    prompt = args.prompt if args.prompt else "(no prompt - proving only)"
     
     log(f"=== Prompt-Driven Generation ===")
     log(f"Project: {args.project}")
-    log(f"Language: {args.language}")
     if args.prove_only:
         log("Mode: PROVE-ONLY (skipping Stage 1)")
     else:
         log(f"Prompt: {prompt[:200]}...")
     
-    ctx = create_context(client, secrets, args.project, prompt, args.language)
+    ctx = create_context(client, secrets, args.project, prompt)
     
     # Create project structure for prompt-driven generation
     create_project_from_prompt(ctx)
@@ -149,79 +120,20 @@ def run_prompt_mode(args, client, secrets):
     log(f"=== Project {args.project} Complete ===")
 
 
-def run_legacy_mode(client, secrets):
-    """Run in legacy translation mode (from examples/)."""
-    log("=== Legacy Mode: Translating from examples/ ===")
-    
-    if not EXAMPLES_DIR.exists():
-        log(f"No source projects found in {EXAMPLES_DIR}")
-        return
-
-    examples = [d for d in EXAMPLES_DIR.iterdir() if d.is_dir()]
-    if not examples:
-        log("No source projects found.")
-        return
-
-    for ex in examples:
-        project_name = ex.name
-        project_path = ex
-        
-        spec_project_root = SPEC_SRC_DIR / project_name
-        spec_project_root.mkdir(parents=True, exist_ok=True)
-        
-        ctx = {
-            "name": project_name,
-            "source_root": project_path,
-            "spec_pkg_root": SPEC_DIR,
-            "spec_src_root": SPEC_SRC_DIR,
-            "spec_project_root": spec_project_root,
-            "client": client,
-            "secrets": secrets,
-            "allowed_lean_writes": set(),
-            "allowed_text_writes": set(),
-            "locked_lean_paths": set(LOCKED_LEAN_FILENAMES),
-            "src_to_lean": {},
-            "lean_to_src": {},
-            "current_stage": "INIT",
-            "equiv_state": {
-                "last_report": None,
-                "passed_runs": 0,
-                "required_runs": DIFF_REQUIRED_RUNS,
-                "min_cases_per_run": DIFF_MIN_CASES_PER_RUN,
-                "last_status": "unknown",
-            },
-            "safety_case_rel": f"spec/reports/{project_name}_SafetyCase.md",
-            "equiv_report_rel": f"spec/reports/{project_name}_EquivalenceReport.json",
-        }
-        
-        log(f"=== Processing Project: {project_name} ===")
-        autogen_scaffold_and_lockdown(ctx)
-        
-        if not ctx["src_to_lean"]:
-            log("No source mapping; skipping.")
-            continue
-
-        run_stage_cogeneration(ctx)
-        run_stage_proving(ctx)
-        log(f"=== Project {project_name} Complete ===")
-
-
 def main() -> None:
-    log("=== Anneal Universal Verification Agent (v2.1) ===")
+    log("=== Anneal Universal Verification Agent (v3.0) ===")
     ensure_prelude_and_lockdown()
     
     args = parse_args()
     secrets = load_secrets()
     client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
 
-    if args.legacy:
-        run_legacy_mode(client, secrets)
-    elif args.prompt or args.prompt_file or args.prove_only:
+    if args.prompt or args.prove_only:
         run_prompt_mode(args, client, secrets)
     else:
         # Default: show help
-        log("No prompt provided. Use --prompt or --prompt-file, or --legacy for translation mode.")
-        log("Example: python main.py --prompt 'Create a stack data structure' --language c")
+        log("No prompt provided. Use --prompt or --prompt-file.")
+        log("Example: python main.py --prompt 'Create a memory arena'")
         log("Or: python main.py --project generated --prove-only")
 
 
