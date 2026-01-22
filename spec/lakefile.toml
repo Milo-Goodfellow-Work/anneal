@@ -1,0 +1,11 @@
+name = "spec"
+version = "0.1.0"
+defaultTargets = ["Spec"]
+
+[[lean_lib]]
+name = "Spec"
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "v4.24.0"
