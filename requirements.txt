@@ -1,0 +1,13 @@
+# Anneal Python Dependencies
+# For GCP deployment
+
+# Core
+google-genai>=1.0.0
+
+# GCP SDK
+google-cloud-storage>=2.0.0
+google-cloud-pubsub>=2.0.0
+google-cloud-secret-manager>=2.0.0
+
+# Aristotle (for proving stage)
+aristotlelib>=0.1.0

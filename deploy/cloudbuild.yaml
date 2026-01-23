@@ -1,0 +1,55 @@
+# Cloud Build configuration for Anneal
+#
+# Builds and pushes the GCP production image to Artifact Registry.
+# Triggered by commits to main branch or manually.
+#
+# Usage:
+#   gcloud builds submit --config=deploy/cloudbuild.yaml .
+
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:latest'
+      - '-f'
+      - 'deploy/Dockerfile.gcp'
+      - '.'
+    timeout: '3600s'  # 1 hour - Mathlib build takes time
+
+  # Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal'
+
+  # Update Cloud Run Job to use new image
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'anneal-worker'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:${SHORT_SHA}'
+      - '--region'
+      - '${_REGION}'
+
+substitutions:
+  _REGION: 'us-central1'
+  _REPOSITORY: 'anneal'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'  # Fast build machine
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:latest'
+
+timeout: '7200s'  # 2 hours total

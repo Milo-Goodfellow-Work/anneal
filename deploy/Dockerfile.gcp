@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.6
+# Anneal GCP Production Dockerfile
+#
+# Builds a production container for Cloud Run Jobs with:
+# - Lean 4 + Mathlib (pre-cached)
+# - Anneal Python code
+# - Job runner entrypoint
+# - Network isolation compatible
+
+FROM python:3.11-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libgmp-dev \
+    xz-utils \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Elan (Lean + Lake)
+RUN curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y
+ENV PATH=/root/.elan/bin:${PATH}
+
+# Python dependencies
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Copy Anneal source
+WORKDIR /app
+COPY main.py helpers.py ./
+COPY stages/ ./stages/
+
+# Copy spec with pre-baked Mathlib cache
+COPY spec/ ./spec/
+
+# Build Mathlib cache into the image (this takes a while but saves runtime)
+RUN cd /app/spec && lake exe cache get && lake build -v
+
+# Copy deploy scripts
+COPY deploy/job_runner.py ./deploy/
+COPY deploy/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Create working directories
+RUN mkdir -p /app/generated
+
+# Run as non-root for security (optional but recommended)
+# RUN useradd -m anneal && chown -R anneal:anneal /app
+# USER anneal
+
+# Entrypoint runs the job runner
+ENTRYPOINT ["/entrypoint.sh"]
