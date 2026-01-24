@@ -1,0 +1,130 @@
+# Full GCP Flow Testing with Emulators
+#
+# Simulates the complete GCP infrastructure locally:
+# - Pub/Sub Emulator (job queue)
+# - Fake GCS Server (results storage)
+# - Anneal Worker
+#
+# Usage:
+#   cd deploy
+#   docker compose -f docker-compose.gcp-test.yaml up --build
+
+services:
+  # ============================================================
+  # Pub/Sub Emulator
+  # ============================================================
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=test-project
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Fake GCS Server (S3-compatible)
+  # ============================================================
+  gcs-emulator:
+    image: fsouza/fake-gcs-server
+    command: -scheme http -port 4443 -external-url http://gcs-emulator:4443
+    ports:
+      - "4443:4443"
+    volumes:
+      - gcs-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4443/storage/v1/b"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Setup: Create Pub/Sub topic and GCS bucket
+  # ============================================================
+  setup:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:latest
+    depends_on:
+      pubsub-emulator:
+        condition: service_healthy
+      gcs-emulator:
+        condition: service_healthy
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      STORAGE_EMULATOR_HOST: http://gcs-emulator:4443
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Setting up Pub/Sub topic..."
+        curl -X PUT "http://pubsub-emulator:8085/v1/projects/test-project/topics/anneal-jobs"
+        curl -X PUT "http://pubsub-emulator:8085/v1/projects/test-project/subscriptions/anneal-jobs-sub" \
+          -H "Content-Type: application/json" \
+          -d '{"topic": "projects/test-project/topics/anneal-jobs"}'
+        
+        echo "Setting up GCS bucket..."
+        curl -X POST "http://gcs-emulator:4443/storage/v1/b?project=test-project" \
+          -H "Content-Type: application/json" \
+          -d '{"name": "anneal-results"}'
+        
+        echo "Setup complete!"
+
+  # ============================================================
+  # Anneal Worker
+  # ============================================================
+  anneal-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gcp
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      # Emulator endpoints
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      STORAGE_EMULATOR_HOST: http://gcs-emulator:4443
+      
+      # Job parameters (for manual testing)
+      JOB_ID: "gcp-test-001"
+      PROMPT: "Create a simple stack with push and pop operations"
+      PROJECT_NAME: "stack"
+      CALLBACK_URL: ""
+      RESULTS_BUCKET: "anneal-results"
+      
+      # API keys (from .env file)
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      ARISTOTLE_API_KEY: ${ARISTOTLE_API_KEY}
+    
+    # For interactive testing, uncomment:
+    # stdin_open: true
+    # tty: true
+
+  # ============================================================
+  # Job Submitter (for testing Pub/Sub flow)
+  # ============================================================
+  submit-job:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:latest
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+    profiles:
+      - submit  # Only run when explicitly requested
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Submitting test job to Pub/Sub..."
+        curl -X POST "http://pubsub-emulator:8085/v1/projects/test-project/topics/anneal-jobs:publish" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "messages": [{
+              "data": "'$(echo -n '{"job_id":"pubsub-test-001","prompt":"Create a ring buffer","project_name":"ringbuf"}' | base64)'"
+            }]
+          }'
+        echo "Job submitted!"
+
+volumes:
+  gcs-data:

@@ -4,14 +4,16 @@ Anneal GCP Job Runner
 
 Consumes jobs from environment variables (set by Cloud Run),
 runs Anneal, uploads results to GCS, and calls webhook.
+
+For local testing, set LOCAL_MODE=true to skip GCS upload.
 """
 import os
 import sys
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from google.cloud import storage
 
 # Job parameters from environment
 JOB_ID = os.environ.get("JOB_ID", "local-test")
@@ -19,6 +21,7 @@ PROMPT = os.environ.get("PROMPT", "")
 PROJECT_NAME = os.environ.get("PROJECT_NAME", "generated")
 CALLBACK_URL = os.environ.get("CALLBACK_URL", "")
 RESULTS_BUCKET = os.environ.get("RESULTS_BUCKET", "anneal-results")
+LOCAL_MODE = os.environ.get("LOCAL_MODE", "").lower() in ("true", "1", "yes")
 
 # Secrets from Secret Manager (injected by Cloud Run)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -72,40 +75,78 @@ def run_anneal() -> dict:
     }
 
 
-def upload_results(anneal_result: dict):
-    """Upload generated files to GCS."""
-    log(f"Uploading results to gs://{RESULTS_BUCKET}/{JOB_ID}/")
-    
-    client = storage.Client()
-    bucket = client.bucket(RESULTS_BUCKET)
-    
-    # Collect files to upload
-    files_to_upload = []
+def collect_output_files() -> list:
+    """Collect all output files to upload/copy."""
+    files = []
     
     # Generated implementation
     gen_dir = Path(f"generated/{PROJECT_NAME}")
     if gen_dir.exists():
         for f in gen_dir.rglob("*"):
             if f.is_file():
-                files_to_upload.append(f)
+                files.append(f)
     
     # Lean specs
     spec_dir = Path(f"spec/Spec/{PROJECT_NAME}")
     if spec_dir.exists():
         for f in spec_dir.rglob("*"):
             if f.is_file():
-                files_to_upload.append(f)
+                files.append(f)
     
     # Reports
     reports_dir = Path("spec/reports")
     if reports_dir.exists():
         for f in reports_dir.glob(f"{PROJECT_NAME}*"):
             if f.is_file():
-                files_to_upload.append(f)
+                files.append(f)
     
-    # Upload each file
-    for local_path in files_to_upload:
-        # Compute GCS path
+    return files
+
+
+def save_results_local(anneal_result: dict) -> dict:
+    """Save results to local output directory (for LOCAL_MODE)."""
+    output_dir = Path("deploy/output") / JOB_ID
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    log(f"Saving results to {output_dir}/")
+    
+    files = collect_output_files()
+    
+    for local_path in files:
+        dest = output_dir / local_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_path, dest)
+        log(f"  Copied: {local_path}")
+    
+    status = {
+        "job_id": JOB_ID,
+        "project_name": PROJECT_NAME,
+        "status": "completed" if anneal_result["exit_code"] == 0 else "failed",
+        "exit_code": anneal_result["exit_code"],
+        "duration_seconds": anneal_result["duration_seconds"],
+        "files_copied": len(files),
+        "completed_at": datetime.now().isoformat(),
+    }
+    
+    (output_dir / "status.json").write_text(json.dumps(status, indent=2))
+    log("Saved status.json")
+    
+    return status
+
+
+def upload_results_gcs(anneal_result: dict) -> dict:
+    """Upload generated files to GCS."""
+    # Import here to avoid dependency when running locally
+    from google.cloud import storage
+    
+    log(f"Uploading results to gs://{RESULTS_BUCKET}/{JOB_ID}/")
+    
+    client = storage.Client()
+    bucket = client.bucket(RESULTS_BUCKET)
+    
+    files = collect_output_files()
+    
+    for local_path in files:
         rel_path = str(local_path)
         gcs_path = f"{JOB_ID}/{rel_path}"
         
@@ -113,14 +154,13 @@ def upload_results(anneal_result: dict):
         blob.upload_from_filename(str(local_path))
         log(f"  Uploaded: {rel_path}")
     
-    # Upload status.json
     status = {
         "job_id": JOB_ID,
         "project_name": PROJECT_NAME,
         "status": "completed" if anneal_result["exit_code"] == 0 else "failed",
         "exit_code": anneal_result["exit_code"],
         "duration_seconds": anneal_result["duration_seconds"],
-        "files_uploaded": len(files_to_upload),
+        "files_uploaded": len(files),
         "completed_at": datetime.now().isoformat(),
     }
     
@@ -129,6 +169,14 @@ def upload_results(anneal_result: dict):
     log("Uploaded status.json")
     
     return status
+
+
+def upload_results(anneal_result: dict) -> dict:
+    """Upload or save results depending on mode."""
+    if LOCAL_MODE:
+        return save_results_local(anneal_result)
+    else:
+        return upload_results_gcs(anneal_result)
 
 
 def call_webhook(status: dict):

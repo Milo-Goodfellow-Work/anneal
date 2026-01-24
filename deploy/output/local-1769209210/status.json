@@ -1,0 +1,9 @@
+{
+  "job_id": "local-1769209210",
+  "project_name": "test_project",
+  "status": "failed",
+  "exit_code": 1,
+  "duration_seconds": 128.565023,
+  "files_copied": 3,
+  "completed_at": "2026-01-23T23:02:19.369663"
+}

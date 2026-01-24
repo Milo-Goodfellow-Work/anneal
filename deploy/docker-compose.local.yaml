@@ -1,0 +1,42 @@
+# Local Testing for Anneal GCP Deployment
+#
+# Simulates Cloud Run Jobs environment locally using Docker Compose.
+# Uses the same Dockerfile and entrypoint as production.
+
+services:
+  anneal-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gcp
+    
+    environment:
+      # Job parameters (simulating what Cloud Run injects)
+      JOB_ID: "local-test-001"
+      PROMPT: "Create a simple counter data structure with increment, decrement, and get operations"
+      PROJECT_NAME: "counter"
+      CALLBACK_URL: ""  # No webhook locally
+      
+      # API keys from .env file
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      ARISTOTLE_API_KEY: ${ARISTOTLE_API_KEY}
+      
+      # Use local storage instead of GCS
+      RESULTS_BUCKET: ""
+      LOCAL_MODE: "true"
+    
+    volumes:
+      # Mount output directory to see results
+      - ./output:/app/output
+      
+      # Optional: mount source for faster iteration (skip rebuild)
+      # - ../main.py:/app/main.py
+      # - ../stages:/app/stages
+      # - ../helpers.py:/app/helpers.py
+    
+    # Network isolation simulation (optional)
+    # networks:
+    #   - isolated
+    
+# networks:
+#   isolated:
+#     internal: true  # No external access
