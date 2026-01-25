@@ -11,13 +11,14 @@ Usage:
   python main.py --project generated --prove-only
 """
 import argparse
+import shutil
 from pathlib import Path
 
 from google import genai
 
 from helpers import (
     log, load_secrets, ensure_prelude_and_lockdown,
-    SPEC_DIR, SPEC_SRC_DIR,
+    SPEC_DIR, SPEC_SRC_DIR, SPEC_TESTS_DIR, SPEC_REPORTS_DIR,
     DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
     LOCKED_LEAN_FILENAMES,
 )
@@ -46,7 +47,56 @@ def parse_args():
         action="store_true",
         help="Skip Stage 1 (co-generation) and run only Stage 2 (proving)"
     )
+    parser.add_argument(
+        "--clear", "-c",
+        action="store_true",
+        help="Clear generated/ and spec/ directories before running (fresh start)"
+    )
     return parser.parse_args()
+
+
+def clear_environment(project_name: str) -> None:
+    """Clear all generated files for a fresh start."""
+    log("Clearing environment for fresh start...")
+    
+    # Clear generated/<project>/
+    gen_dir = Path("generated") / project_name
+    if gen_dir.exists():
+        shutil.rmtree(gen_dir)
+        log(f"  Removed {gen_dir}")
+    
+    # Clear spec/Spec/<project>/
+    spec_project_dir = SPEC_SRC_DIR / project_name
+    if spec_project_dir.exists():
+        shutil.rmtree(spec_project_dir)
+        log(f"  Removed {spec_project_dir}")
+    
+    # Clear the project root module (e.g., spec/Spec/generated.lean)
+    project_module = SPEC_SRC_DIR / f"{project_name}.lean"
+    if project_module.exists():
+        project_module.unlink()
+        log(f"  Removed {project_module}")
+    
+    # Clear spec/tests/
+    if SPEC_TESTS_DIR.exists():
+        for f in SPEC_TESTS_DIR.iterdir():
+            if f.is_file():
+                f.unlink()
+        log(f"  Cleared {SPEC_TESTS_DIR}")
+    
+    # Clear spec/reports/ (but only for this project)
+    if SPEC_REPORTS_DIR.exists():
+        for f in SPEC_REPORTS_DIR.glob(f"{project_name}*"):
+            f.unlink()
+            log(f"  Removed {f}")
+    
+    # Reset spec/Spec.lean to just import Prelude
+    spec_lean = SPEC_DIR / "Spec.lean"
+    if spec_lean.exists():
+        spec_lean.write_text("import Spec.Prelude\n")
+        log(f"  Reset {spec_lean}")
+    
+    log("Environment cleared.")
 
 
 def create_context(client, secrets, project_name: str, prompt: str) -> dict:
@@ -125,6 +175,11 @@ def main() -> None:
     ensure_prelude_and_lockdown()
     
     args = parse_args()
+    
+    # Clear environment if requested
+    if args.clear:
+        clear_environment(args.project)
+    
     secrets = load_secrets()
     client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
 

@@ -23,7 +23,7 @@ SPEC_DIR = Path("spec").resolve()
 SPEC_SRC_DIR = SPEC_DIR / "Spec"
 EXAMPLES_DIR = Path("examples").resolve()
 
-MODEL_ID = "gemini-3-pro-preview"
+MODEL_ID = "gemini-3-flash-preview"
 
 PRINT_TRUNC = 4000
 MAX_TOOL_READ_CHARS = 80_000
@@ -56,6 +56,7 @@ PRELUDE_REQUIRED_IMPORTS = [
 DIFF_REQUIRED_RUNS = 5          # number of distinct seeds / runs required to pass before equivalence can complete
 DIFF_MIN_CASES_PER_RUN = 5      # minimum number of command lines / cases per run
 DIFF_SEED_START = 1             # seeds will be DIFF_SEED_START..DIFF_SEED_START+DIFF_REQUIRED_RUNS-1
+DIFF_MIN_OUTPUT_RATIO = 0.75    # at least 75% of test cases must produce non-empty output (not trivial tests)
 
 # Subprocess timeouts
 GEN_TIMEOUT_S = 8

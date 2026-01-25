@@ -1,0 +1,72 @@
+Generate formal specifications (theorems with proofs) for the Lean code in Spec.generated.Main.
+
+CRITICAL INSTRUCTIONS:
+1. DO NOT redefine any types or functions - they are already defined in Main.lean
+2. IMPORT Main.lean using: import Spec.generated.Main
+3. Only ADD theorems that prove properties about the EXISTING definitions
+4. Write your output to Spec/generated/Verif.lean
+
+The definitions you should prove properties about are in Main.lean:
+
+```lean
+import Spec.Prelude
+
+namespace Spec.generated
+
+namespace TwoSum
+
+structure Element where
+  value : Int
+  originalIndex : Nat
+deriving Repr, Inhabited, DecidableEq
+
+def mkElement (v : Int) (i : Nat) : Element :=
+  { value := v, originalIndex := i }
+
+def compareElements (a b : Element) : Bool :=
+  if a.value == b.value then
+    a.originalIndex < b.originalIndex
+  else
+    a.value < b.value
+
+def twoSum (nums : Array Int) (target : Int) : Option (Nat × Nat) :=
+  let n := nums.size
+  if n < 2 then none
+  else
+    let indices := Array.range n
+    let elements := (nums.zip indices).map (fun (x : Int × Nat) => mkElement x.1 x.2)
+    let sorted := elements.qsort compareElements
+    let rec loop (l r : Nat) : Option (Nat × Nat) :=
+      if l >= r then none
+      else
+        let el := sorted[l]!
+        let er := sorted[r]!
+        let sum := el.value + er.value
+        if sum == target then
+          some (el.originalIndex, er.originalIndex)
+        else if sum < target then
+          loop (l + 1) r
+        else
+          loop l (r - 1)
+    loop 0 (n - 1)
+
+end TwoSum
+
+end Spec.generated
+
+```
+
+REQUIRED THEOREMS:
+1. Structural invariants (e.g., data structure validity conditions)
+2. Functional correctness (operations have expected effects)
+3. Edge case handling (empty inputs, bounds, overflow)
+4. Push/pop or similar operation inverses where applicable
+
+OUTPUT FORMAT:
+- Start with: import Spec.Prelude
+- Then: import Spec.generated.Main
+- Open namespace: namespace Spec.generated
+- Add theorems referencing existing types like `Stack`, `stackPush`, etc.
+- All proofs must be complete (no sorry)
+
+Remember: DO NOT redefine Stack, StackRes, etc. They already exist in Main.lean.

@@ -2,6 +2,13 @@
 Anneal Stages - Differential testing implementation.
 
 This module contains the procedural differential test runner.
+
+Differential testing works by:
+1. Generating test inputs (commands) via gen_inputs.py
+2. Feeding the SAME inputs to both the C harness and Lean harness
+3. Comparing their stdout - they must be byte-for-byte identical
+
+Both programs run independently and receive identical stdin.
 """
 from __future__ import annotations
 import sys
@@ -12,13 +19,45 @@ import shlex
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List
+from datetime import datetime
 
 from helpers import (
     log, trunc, trunc_tail, _safe_relpath, run_lake_build, run_lake_build_target,
-    list_project_files, SPEC_DIR, SPEC_TESTS_DIR,
-    DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN, DIFF_SEED_START,
+    list_project_files, SPEC_DIR, SPEC_TESTS_DIR, SPEC_REPORTS_DIR,
+    DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN, DIFF_SEED_START, DIFF_MIN_OUTPUT_RATIO,
     GEN_TIMEOUT_S, C_RUN_TIMEOUT_S, LEAN_RUN_TIMEOUT_S,
 )
+
+
+def _save_trace(project_name: str, seed: int, inputs: str, c_out: str, lean_out: str, match: bool):
+    """Save input/output pairs to a trace file for inspection."""
+    trace_dir = SPEC_REPORTS_DIR
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    trace_file = trace_dir / f"{project_name}_diff_trace.txt"
+    
+    # Parse into lines
+    input_lines = [l for l in inputs.strip().split('\n') if l.strip()]
+    c_lines = [l for l in c_out.strip().split('\n') if l.strip()]
+    lean_lines = [l for l in lean_out.strip().split('\n') if l.strip()]
+    
+    with open(trace_file, 'a') as f:
+        f.write(f"\n# Seed {seed} — {'PASS' if match else 'FAIL'}\n")
+        
+        # Match inputs to outputs line by line
+        max_cases = max(len(input_lines), len(c_lines), len(lean_lines))
+        for i in range(max_cases):
+            inp = input_lines[i] if i < len(input_lines) else "(no input)"
+            c = c_lines[i] if i < len(c_lines) else "(no output)"
+            lean = lean_lines[i] if i < len(lean_lines) else "(no output)"
+            ok = "✓" if c == lean else "✗"
+            
+            # Truncate long inputs for readability
+            if len(inp) > 80:
+                inp = inp[:77] + "..."
+            
+            f.write(f"{ok} | {inp} | C: {c} | Lean: {lean}\n")
+    
+    log(f"[DiffTest] Trace saved to {trace_file}")
 
 
 def _normalize_lean_harness_relpath(p: str) -> str:
@@ -303,9 +342,26 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
                 "stdout": trunc(lean_out, 2500),
             })
 
-        if c_out == lean_out:
+        # Save trace for inspection
+        match = (c_out == lean_out)
+        _save_trace(ctx["name"], seed, inputs, c_out, lean_out, match)
+        
+        # Check that harness actually produced SOME output (not completely empty)
+        c_output_lines = [l.strip() for l in c_out.strip().split('\n') if l.strip()]
+        num_outputs = len(c_output_lines)
+        
+        if num_outputs == 0:
+            return json.dumps({
+                "status": "no_output",
+                "where": "output_coverage",
+                "seed": seed,
+                "input_lines": num_cases,
+                "message": "C harness produced no output at all. Tests must produce output to verify behavior.",
+            })
+        
+        if match:
             passed += 1
-            runs.append({"seed": seed, "cases": num_cases, "status": "pass"})
+            runs.append({"seed": seed, "cases": num_cases, "outputs": num_outputs, "status": "pass"})
             continue
 
         return json.dumps({

@@ -172,13 +172,36 @@ def create_project_from_prompt(ctx: dict) -> None:
         )
         _write_text_file(root_module, root_content)
     
-    # Register in package root
+    # Register in package root (and clean up stale imports)
     spec_file = ctx["spec_src_root"].parent / "Spec.lean"
     line = f"import Spec.{project_name}"
+    
     if spec_file.exists():
         content = _read_text_file(spec_file)
-        if line not in content:
-            _write_text_file(spec_file, content.rstrip() + "\n" + line + "\n")
+        # Clean up stale imports (imports to non-existent modules)
+        valid_lines = []
+        for l in content.strip().split("\n"):
+            l = l.strip()
+            if not l:
+                continue
+            if l.startswith("import Spec."):
+                # Extract module name and check if file exists
+                parts = l.split()
+                if len(parts) >= 2:
+                    mod = parts[1].replace("Spec.", "")
+                    mod_file = ctx["spec_src_root"] / f"{mod}.lean"
+                    mod_dir = ctx["spec_src_root"] / mod
+                    if mod_file.exists() or mod_dir.exists():
+                        valid_lines.append(l)
+                    else:
+                        log(f"Removing stale import: {l}")
+            else:
+                valid_lines.append(l)
+        
+        if line not in valid_lines:
+            valid_lines.append(line)
+        
+        _write_text_file(spec_file, "\n".join(valid_lines) + "\n")
     else:
         _write_text_file(spec_file, line + "\n")
     

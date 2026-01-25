@@ -314,7 +314,7 @@ def _repair_verif_or_fallback(ctx: dict, content: str, build_error: str) -> None
 
 
 def _generate_safety_case(ctx: dict) -> None:
-    """Generate a safety case document summarizing the verification."""
+    """Generate safety case and comprehensive equivalence report."""
     safety_case_path = Path(ctx["safety_case_rel"])
     
     # Get equivalence test report
@@ -345,6 +345,9 @@ with integrated differential testing to ensure semantic equivalence.
 - Minimum Cases per Run: {DIFF_MIN_CASES_PER_RUN}
 - Total Test Time: {total_time:.2f}s
 
+> **For complete test evidence**, see the detailed equivalence report:
+> `{ctx['name']}_EquivalenceReport.md`
+
 ### Stage 2: Formal Specification and Proof
 
 {"The Lean implementation has been formally specified and proven via Aristotle." if has_proofs else "Formal proofs pending - Aristotle configuration required."}
@@ -366,6 +369,13 @@ with integrated differential testing to ensure semantic equivalence.
 """
     _write_text_file(safety_case_path, content)
     log(f"Generated safety case at {safety_case_path}")
+    
+    # Generate the comprehensive equivalence report
+    try:
+        from stages.report import generate_equivalence_report
+        generate_equivalence_report(ctx)
+    except Exception as e:
+        log(f"Warning: Could not generate equivalence report: {e}")
 
 
 # Import at module level for safety case generation
