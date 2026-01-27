@@ -8,7 +8,7 @@ from helpers import (run_lake_build, run_lake_build_target, list_project_files, 
                      GEN_TIMEOUT_S, C_RUN_TIMEOUT_S, LEAN_RUN_TIMEOUT_S)
 
 def _safe_relpath(p: str) -> str:
-    return (p or "").replace("\\", "/").lstrip("/").lstrip("./").replace("spec/Spec/", "").replace("Spec/", "")
+    return (p or "").replace("\\", "/").lstrip("/").lstrip("./").replace("spec/Src/", "").replace("Src/", "")
 
 def _trunc(s: str, n: int = 2000) -> str:
     return s[:n] + "..." if len(s) > n else s
@@ -67,7 +67,7 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
     if not b.startswith("Build Success"):
         return json.dumps({"status": "error", "where": "lean_build", "message": _trunc(b)})
     log("  [DiffTest] building Harness target...")
-    hb = run_lake_build_target(ctx["spec_pkg_root"], target="Spec.tests.Harness")
+    hb = run_lake_build_target(ctx["spec_pkg_root"], target="Src.tests.Harness")
     if not hb.startswith("Build Success"):
         return json.dumps({"status": "error", "where": "harness_build", "message": _trunc(hb, 3000)})
 

@@ -30,8 +30,7 @@ def run_stage_proving(ctx: dict) -> None:
     os.environ["ARISTOTLE_API_KEY"] = api_key
 
     impl_files = [ctx["spec_src_root"] / rel for rel in sorted(ctx["allowed_lean_writes"])
-                  if rel.startswith(f"{ctx['name']}/") and not rel.endswith("Verif.lean") 
-                  and (ctx["spec_src_root"] / rel).exists()]
+                  if not rel.endswith("Verif.lean") and (ctx["spec_src_root"] / rel).exists()]
 
     if not impl_files:
         log("No implementation files found")
@@ -56,15 +55,14 @@ def run_stage_proving(ctx: dict) -> None:
     log("=== Stage 2 Complete ===")
 
 async def _submit_to_aristotle(ctx: dict, impl_files: list) -> None:
-    verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
-    main_rel = f"Spec.{ctx['name']}.Main"
+    verif_path = ctx["spec_src_root"] / "Verif.lean"
     
-    stub = f"""import Spec.Prelude
-import {main_rel}
+    stub = """import Src.Prelude
+import Src.Main
 
-namespace Spec.{ctx['name']}
+namespace Src
 #check @Nat.add
-end Spec.{ctx['name']}
+end Src
 """
     verif_path.write_text(stub)
     
@@ -72,8 +70,8 @@ end Spec.{ctx['name']}
         return
 
     main_content = impl_files[0].read_text() if impl_files else ""
-    desc_path = ctx["spec_pkg_root"] / f"aristotle_request_{ctx['name']}.txt"
-    desc_path.write_text(f"Generate theorems for {main_rel}.\n\n```lean\n{main_content}\n```")
+    desc_path = ctx["spec_pkg_root"] / "aristotle_request.txt"
+    desc_path.write_text(f"Generate theorems for Src.Main.\n\n```lean\n{main_content}\n```")
     
     verif_rel = str(verif_path.relative_to(ctx["spec_pkg_root"]))
     result = await aristotlelib.Project.prove_from_file(
@@ -88,12 +86,12 @@ end Spec.{ctx['name']}
         log(f"Aristotle job submitted: {result}")
 
 def _create_placeholder_verif(ctx: dict) -> None:
-    path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
+    path = ctx["spec_src_root"] / "Verif.lean"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"""import Spec.Prelude
-import Spec.{ctx['name']}.Main
+    path.write_text("""import Src.Prelude
+import Src.Main
 
-namespace Spec.{ctx['name']}
+namespace Src
 -- Placeholder: Aristotle not available
-end Spec.{ctx['name']}
+end Src
 """)

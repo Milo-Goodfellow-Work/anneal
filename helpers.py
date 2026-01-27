@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any, NamedTuple
 
 SECRETS_FILE = Path("secrets.toml")
 SPEC_DIR = Path("spec").resolve()
-SPEC_SRC_DIR = SPEC_DIR / "Spec"
+SPEC_SRC_DIR = SPEC_DIR / "Src"
 SPEC_TESTS_DIR = SPEC_DIR / "tests"
 SPEC_REPORTS_DIR = SPEC_DIR / "reports"
 
@@ -29,9 +29,6 @@ C_RUN_TIMEOUT_S = 8
 LEAN_RUN_TIMEOUT_S = 3000
 
 LOCKED_LEAN_FILENAMES = {"Prelude.lean"}
-
-PRELUDE_REQUIRED_IMPORTS = ["Std", "Std.Data.TreeMap", "Std.Data.TreeSet", 
-                            "Std.Data.HashMap", "Std.Data.HashSet", "Mathlib"]
 
 # ============================================================
 # Utilities
@@ -110,19 +107,6 @@ def excerpt_around(text: str, line: int, radius: int = 14) -> str:
                      for idx in range(max(0, i - radius), min(len(lines), i + radius + 1)))
 
 # ============================================================
-# Prelude
-# ============================================================
-
-PRELUDE_PATH = SPEC_SRC_DIR / "Prelude.lean"
-
-def ensure_prelude_and_lockdown() -> None:
-    SPEC_SRC_DIR.mkdir(parents=True, exist_ok=True)
-    imports = "\n".join(f"import {m}" for m in PRELUDE_REQUIRED_IMPORTS)
-    default = f"{imports}\n\nnamespace Spec\nabbrev U8 := UInt8\nabbrev U16 := UInt16\nabbrev U32 := UInt32\nabbrev U64 := UInt64\nend Spec\n"
-    if not PRELUDE_PATH.exists():
-        PRELUDE_PATH.write_text(default)
-
-# ============================================================
 # Tool schema
 # ============================================================
 
@@ -148,16 +132,18 @@ TOOLS_SCHEMA = [
 ]
 
 # ============================================================
+# ============================================================
 # Validation (minimal)
 # ============================================================
 
-def validate_basic_lean_shape(project: str, rel_path: str, content: str) -> tuple[bool, str]:
+def validate_basic_lean_shape(rel_path: str, content: str) -> tuple[bool, str]:
     if not content.strip():
         return False, "Empty file"
-    if f"namespace Spec.{project}" not in content:
-        return False, f"Missing namespace Spec.{project}"
-    if f"end Spec.{project}" not in content:
-        return False, f"Missing end Spec.{project}"
+    if "namespace Src" not in content:
+        return False, "Missing namespace Src"
+    if "end Src" not in content:
+        return False, "Missing end Src"
     if not rel_path.endswith("Verif.lean") and "sorry" in content:
         return False, "'sorry' not allowed outside Verif.lean"
     return True, ""
+

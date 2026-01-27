@@ -20,7 +20,6 @@ from helpers import (
 
 def generate_report(ctx: dict) -> str:
     """Generate unified report and test data files."""
-    project_name = ctx["name"]
     
     # Get test results from context
     equiv_state = ctx.get("equiv_state", {})
@@ -33,12 +32,12 @@ def generate_report(ctx: dict) -> str:
     test_data = _get_test_data(ctx)
     
     # Write test data JSON
-    tests_path = SPEC_REPORTS_DIR / f"{project_name}_tests.json"
+    tests_path = SPEC_REPORTS_DIR / "tests.json"
     _write_text_file(tests_path, json.dumps(test_data, indent=2))
     log(f"Generated test data at {tests_path}")
     
     # Build and write unified report
-    report_path = SPEC_REPORTS_DIR / f"{project_name}_report.md"
+    report_path = SPEC_REPORTS_DIR / "report.md"
     report_content = _build_unified_report(ctx, api_info, test_data, last_report)
     _write_text_file(report_path, report_content)
     log(f"Generated report at {report_path}")
@@ -125,19 +124,18 @@ def _build_unified_report(
     summary: Dict[str, Any],
 ) -> str:
     """Build the unified report markdown."""
-    project_name = ctx["name"]
     
     passed = summary.get("passed_runs", 0) if isinstance(summary, dict) else 0
     required = summary.get("required_runs", DIFF_REQUIRED_RUNS) if isinstance(summary, dict) else DIFF_REQUIRED_RUNS
     total_time = summary.get("total_time_s", 0) if isinstance(summary, dict) else 0
     
     # Check for formal proofs
-    verif_path = ctx.get("spec_src_root", Path("spec/Spec")) / f"{project_name}/Verif.lean"
+    verif_path = ctx.get("spec_src_root", Path("spec/Src")) / "Verif.lean"
     has_proofs = verif_path.exists() and "sorry" not in _read_text_file(verif_path)
     
     status = "✅ VERIFIED" if passed >= required else "❌ FAILED"
     
-    report = f"""# {project_name} — Verification Report
+    report = f"""# Verification Report
 
 **Status:** {status}  
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}

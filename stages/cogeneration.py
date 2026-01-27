@@ -18,7 +18,7 @@ def run_stage_cogeneration(ctx: dict) -> None:
     payload = (
         f"TASK: Generate a C implementation AND equivalent Lean code\n\n"
         f"SPECIFICATION:\n{prompt}\n\n"
-        f"Write C code in {ctx['source_root']}/, Lean in spec/Spec/{ctx['name']}/Main.lean.\n"
+        f"Write C code in {ctx['source_root']}/, Lean in spec/Src/Main.lean.\n"
         f"Include test harnesses. Run differential tests until they pass, then call submit_stage.\n"
     )
     

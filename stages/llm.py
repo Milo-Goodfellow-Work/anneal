@@ -96,7 +96,7 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
                 log(f"  ✗ Write denied: {rel} (not in writable set)")
                 return tool_output_item(call_id, f"Denied: {rel} not in writable set"), False
             content = args.get("content", "")
-            ok, reason = validate_basic_lean_shape(ctx["name"], rel, content)
+            ok, reason = validate_basic_lean_shape(rel, content)
             if not ok:
                 log(f"  ✗ Rejected: {rel} - {reason}")
                 return tool_output_item(call_id, f"Rejected: {reason}"), False

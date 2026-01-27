@@ -8,14 +8,12 @@ def _files_list(ctx: dict, key: str) -> str:
 
 def base_instructions_prompt_cogen(ctx: dict) -> str:
     prompt = ctx.get("prompt", "")
-    lean_files = list_lean_files(ctx["spec_src_root"])
     
     return f"""ROLE: Co-Generation Engine - generate C implementation AND Lean 4 equivalent.
 SETTING: SAFETY-CRITICAL. Correctness mandatory. No placeholders/stubs.
 
-PROJECT: {ctx['name']}
 IMPLEMENTATION DIR: {ctx['source_root']}
-LEAN DIR: {ctx['spec_src_root']}/{ctx['name']}/
+LEAN DIR: {ctx['spec_src_root']}/
 
 WRITABLE LEAN FILES:
 {_files_list(ctx, 'allowed_lean_writes')}
@@ -28,10 +26,10 @@ SPECIFICATION:
 
 DELIVERABLES:
 1. C implementation in {ctx['source_root']}/
-2. Lean 4 definitions in spec/Spec/{ctx['name']}/Main.lean
+2. Lean 4 definitions in spec/Src/Main.lean
 3. Test generator: spec/tests/gen_inputs.py
 4. C harness: spec/tests/harness.c
-5. Lean harness: spec/Spec/tests/Harness.lean
+5. Lean harness: spec/Src/tests/Harness.lean
 
 LEAN 4 IO:
   let stdin ← IO.getStdin
@@ -48,6 +46,7 @@ PROCESS:
 
 RULES:
 - NO 'sorry' anywhere
-- Each module MUST 'import Spec.Prelude'
+- Each module MUST 'import Src.Prelude'
+- Use 'namespace Src' / 'end Src'
 - Tests: 5 runs x 5 cases minimum
 """
