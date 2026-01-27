@@ -13,44 +13,29 @@ import Spec.Prelude
 
 namespace Spec.generated
 
-namespace TwoSum
+structure TwoSumResult where
+  idx1 : Int
+  idx2 : Int
+  found : Bool
+  deriving Repr, BEq
 
-structure Element where
-  value : Int
-  originalIndex : Nat
-deriving Repr, Inhabited, DecidableEq
-
-def mkElement (v : Int) (i : Nat) : Element :=
-  { value := v, originalIndex := i }
-
-def compareElements (a b : Element) : Bool :=
-  if a.value == b.value then
-    a.originalIndex < b.originalIndex
-  else
-    a.value < b.value
-
-def twoSum (nums : Array Int) (target : Int) : Option (Nat × Nat) :=
-  let n := nums.size
-  if n < 2 then none
-  else
-    let indices := Array.range n
-    let elements := (nums.zip indices).map (fun (x : Int × Nat) => mkElement x.1 x.2)
-    let sorted := elements.qsort compareElements
-    let rec loop (l r : Nat) : Option (Nat × Nat) :=
-      if l >= r then none
-      else
-        let el := sorted[l]!
-        let er := sorted[r]!
-        let sum := el.value + er.value
-        if sum == target then
-          some (el.originalIndex, er.originalIndex)
-        else if sum < target then
-          loop (l + 1) r
+def solveTwoSum (nums : List Int) (target : Int) : TwoSumResult :=
+  let n := nums.length
+  let arr := nums.toArray
+  let rec find (i j : Nat) : TwoSumResult :=
+    if h1 : i < n then
+      if h2 : j < n then
+        if arr[i]! + arr[j]! == target then
+          { idx1 := (i : Int), idx2 := (j : Int), found := true }
         else
-          loop l (r - 1)
-    loop 0 (n - 1)
-
-end TwoSum
+          find i (j + 1)
+      else
+        find (i + 1) (i + 2)
+    else
+      { idx1 := 0, idx2 := 0, found := false }
+    termination_by (n - i, n - j)
+  
+  find 0 1
 
 end Spec.generated
 

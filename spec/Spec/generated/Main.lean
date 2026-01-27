@@ -1,44 +1,43 @@
 import Spec.Prelude
+import Std.Data.HashMap
 
-namespace Spec.generated
+namespace Spec.generated.Main
 
-structure IndexedValue where
-  value : Int
-  index : Int
-  deriving Inhabited
-
-def IndexedValue.lt (a b : IndexedValue) : Bool :=
-  if a.value < b.value then true
-  else if a.value > b.value then false
-  else a.index < b.index
-
-structure TwoSumResult where
-  index1 : Int
-  index2 : Int
-  deriving Repr, BEq
-
-def solveTwoSum (nums : Array Int) (target : Int) : TwoSumResult :=
-  let indexed := nums.mapIdx (fun i v => { value := v, index := (i : Int) : IndexedValue })
-  let sorted := indexed.qsort IndexedValue.lt
-  let rec loop (l r : Nat) : TwoSumResult :=
-    if h : l < r then
-      let leftVal := sorted.get! l
-      let rightVal := sorted.get! r
-      let sum := leftVal.value + rightVal.value
-      if sum == target then
-        if leftVal.index < rightVal.index then
-          { index1 := leftVal.index, index2 := rightVal.index }
-        else
-          { index1 := rightVal.index, index2 := leftVal.index }
-      else if sum < target then
-        loop (l + 1) r
-      else
-        loop l (r - 1)
+def twoSum (nums : Array Int) (target : Int) : Option (Nat × Nat) :=
+  let rec loop (i : Nat) (map : Std.HashMap Int Nat) : Option (Nat × Nat) :=
+    if h : i < nums.size then
+      let x := nums[i]
+      let complement := target - x
+      match map.get? complement with
+      | some j => some (j, i)
+      | none => loop (i + 1) (map.insert x i)
     else
-      { index1 := -1, index2 := -1 }
-  if sorted.size < 2 then
-    { index1 := -1, index2 := -1 }
-  else
-    loop 0 (sorted.size - 1)
+      none
+  loop 0 Std.HashMap.empty
 
-end Spec.generated
+def main : IO Unit := do
+  let stdin ← IO.getStdin
+  let stdout ← IO.getStdout
+  
+  let line1 ← stdin.getLine
+  if line1.isEmpty then return
+  let n := line1.trim.toNat!
+  
+  let line2 ← stdin.getLine
+  if line2.isEmpty then return
+  let target := line2.trim.toInt!
+  
+  let line3 ← stdin.getLine
+  if line3.isEmpty then return
+  let nums := line3.splitOn " " |>.filter (fun s => !s.isEmpty) |>.map (fun s => s.trim.toInt!) |>.toArray
+  
+  match twoSum nums target with
+  | some (i, j) => 
+    if i < j then
+      stdout.putStrLn s!"{i} {j}"
+    else
+      stdout.putStrLn s!"{j} {i}"
+  | none => 
+    stdout.putStrLn "-1 -1"
+
+end Spec.generated.Main

@@ -1,197 +1,105 @@
 #!/usr/bin/env python3
-"""
-Anneal - Universal Verification Agent (v3.0)
-
-Generates verified C code from natural language prompts:
-  Stage 1: Co-Generation - Generate C Implementation + Lean + Differential Tests
-  Stage 2: Proving - Specification + Proof via Aristotle
-
-Usage:
-  python main.py --prompt "Create a memory arena"
-  python main.py --project generated --prove-only
-"""
-import argparse
-import shutil
+"""Anneal - Universal Verification Agent. Generates verified C code from prompts."""
+import argparse, os, sys, time, shutil
 from pathlib import Path
-
 from google import genai
-
-from helpers import (
-    log, load_secrets, ensure_prelude_and_lockdown,
-    SPEC_DIR, SPEC_SRC_DIR, SPEC_TESTS_DIR, SPEC_REPORTS_DIR,
-    DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
-    LOCKED_LEAN_FILENAMES,
-)
-
+from helpers import (log, load_secrets, ensure_prelude_and_lockdown, SPEC_DIR, SPEC_SRC_DIR, 
+                     SPEC_TESTS_DIR, SPEC_REPORTS_DIR, DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN, LOCKED_LEAN_FILENAMES)
 from stages.scaffold import create_project_from_prompt
 from stages.cogeneration import run_stage_cogeneration
 from stages.proving import run_stage_proving
 
+GCP_JOB_ID = os.environ.get("JOB_ID", "")
+GCP_RESULTS_BUCKET = os.environ.get("RESULTS_BUCKET", "")
+
+def is_gcp_mode() -> bool:
+    return bool(GCP_JOB_ID and GCP_RESULTS_BUCKET)
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Anneal - Generate verified code from prompts"
-    )
-    parser.add_argument(
-        "--prompt", "-p",
-        help="Natural language description of what to build"
-    )
-    parser.add_argument(
-        "--project", "-n",
-        default="generated",
-        help="Project name (default: generated)"
-    )
+    p = argparse.ArgumentParser(description="Anneal - Generate verified code from prompts")
+    p.add_argument("--prompt", "-p", help="Natural language description")
+    p.add_argument("--project", "-n", default="generated", help="Project name")
+    p.add_argument("--prove-only", action="store_true", help="Skip Stage 1, run only Stage 2")
+    p.add_argument("--clear", "-c", action="store_true", help="Clear generated files first")
+    return p.parse_args()
 
-    parser.add_argument(
-        "--prove-only",
-        action="store_true",
-        help="Skip Stage 1 (co-generation) and run only Stage 2 (proving)"
-    )
-    parser.add_argument(
-        "--clear", "-c",
-        action="store_true",
-        help="Clear generated/ and spec/ directories before running (fresh start)"
-    )
-    return parser.parse_args()
-
-
-def clear_environment(project_name: str) -> None:
-    """Clear all generated files for a fresh start."""
-    log("Clearing environment for fresh start...")
-    
-    # Clear generated/<project>/
-    gen_dir = Path("generated") / project_name
-    if gen_dir.exists():
-        shutil.rmtree(gen_dir)
-        log(f"  Removed {gen_dir}")
-    
-    # Clear spec/Spec/<project>/
-    spec_project_dir = SPEC_SRC_DIR / project_name
-    if spec_project_dir.exists():
-        shutil.rmtree(spec_project_dir)
-        log(f"  Removed {spec_project_dir}")
-    
-    # Clear the project root module (e.g., spec/Spec/generated.lean)
-    project_module = SPEC_SRC_DIR / f"{project_name}.lean"
-    if project_module.exists():
-        project_module.unlink()
-        log(f"  Removed {project_module}")
-    
-    # Clear spec/tests/
+def clear_environment(name: str) -> None:
+    log(f"Clearing environment for {name}...")
+    for d in [Path("generated") / name, SPEC_SRC_DIR / name]:
+        if d.exists(): shutil.rmtree(d); log(f"  Removed {d}")
+    for f in [SPEC_SRC_DIR / f"{name}.lean"]:
+        if f.exists(): f.unlink(); log(f"  Removed {f}")
     if SPEC_TESTS_DIR.exists():
         for f in SPEC_TESTS_DIR.iterdir():
-            if f.is_file():
-                f.unlink()
-        log(f"  Cleared {SPEC_TESTS_DIR}")
-    
-    # Clear spec/reports/ (but only for this project)
-    if SPEC_REPORTS_DIR.exists():
-        for f in SPEC_REPORTS_DIR.glob(f"{project_name}*"):
-            f.unlink()
-            log(f"  Removed {f}")
-    
-    # Reset spec/Spec.lean to just import Prelude
-    spec_lean = SPEC_DIR / "Spec.lean"
-    if spec_lean.exists():
-        spec_lean.write_text("import Spec.Prelude\n")
-        log(f"  Reset {spec_lean}")
-    
-    log("Environment cleared.")
+            if f.is_file(): f.unlink()
+    # Remove stale import from Spec.lean
+    spec_file = SPEC_DIR / "Spec.lean"
+    if spec_file.exists():
+        import_line = f"import Spec.{name}"
+        lines = [l for l in spec_file.read_text().splitlines() if l.strip() != import_line]
+        spec_file.write_text("\n".join(lines) + "\n" if lines else "")
+        log(f"  Cleaned {spec_file}")
 
-
-def create_context(client, secrets, project_name: str, prompt: str) -> dict:
-    """Create context for prompt-driven generation (C only)."""
-    spec_project_root = SPEC_SRC_DIR / project_name
-    spec_project_root.mkdir(parents=True, exist_ok=True)
-    
-    # For prompt-driven, impl goes in generated/<project>/
-    impl_root = Path("generated") / project_name
+def create_context(client, secrets, name: str, prompt: str) -> dict:
+    (SPEC_SRC_DIR / name).mkdir(parents=True, exist_ok=True)
+    impl_root = Path("generated") / name
     impl_root.mkdir(parents=True, exist_ok=True)
-    
     return {
-        "name": project_name,
-        "prompt": prompt,
-        "source_root": impl_root,  # Where generated impl goes
-        "spec_pkg_root": SPEC_DIR,
-        "spec_src_root": SPEC_SRC_DIR,
-        "spec_project_root": spec_project_root,
-        "client": client,
-        "secrets": secrets,
-        # Autogenerated write-allowlists (populated by scaffold)
-        "allowed_lean_writes": set(),
-        "allowed_text_writes": set(),
-        "locked_lean_paths": set(LOCKED_LEAN_FILENAMES),
-        # Source->Lean mapping (populated by scaffold)
-        "src_to_lean": {},
-        "lean_to_src": {},
-        # Stage tracking
-        "current_stage": "INIT",
-        "equiv_state": {
-            "last_report": None,
-            "passed_runs": 0,
-            "required_runs": DIFF_REQUIRED_RUNS,
-            "min_cases_per_run": DIFF_MIN_CASES_PER_RUN,
-            "last_status": "unknown",
-        },
-        # Paths
-        "safety_case_rel": f"spec/reports/{project_name}_SafetyCase.md",
-        "equiv_report_rel": f"spec/reports/{project_name}_EquivalenceReport.json",
+        "name": name, "prompt": prompt, "source_root": impl_root,
+        "spec_pkg_root": SPEC_DIR, "spec_src_root": SPEC_SRC_DIR,
+        "spec_project_root": SPEC_SRC_DIR / name, "client": client, "secrets": secrets,
+        "allowed_lean_writes": set(), "allowed_text_writes": set(), "locked_lean_paths": set(LOCKED_LEAN_FILENAMES),
+        "src_to_lean": {}, "lean_to_src": {}, "current_stage": "INIT",
+        "equiv_state": {"last_report": None, "passed_runs": 0, "required_runs": DIFF_REQUIRED_RUNS,
+                       "min_cases_per_run": DIFF_MIN_CASES_PER_RUN, "last_status": "unknown"},
+        "equiv_report_rel": f"spec/reports/{name}_equiv.json",
     }
 
-
-def run_prompt_mode(args, client, secrets):
-    """Run in prompt-driven generation mode."""
-    prompt = args.prompt if args.prompt else "(no prompt - proving only)"
-    
-    log(f"=== Prompt-Driven Generation ===")
-    log(f"Project: {args.project}")
-    if args.prove_only:
-        log("Mode: PROVE-ONLY (skipping Stage 1)")
-    else:
-        log(f"Prompt: {prompt[:200]}...")
-    
-    ctx = create_context(client, secrets, args.project, prompt)
-    
-    # Create project structure for prompt-driven generation
+def run_generation(prompt: str, name: str, prove_only: bool, client, secrets) -> bool:
+    ctx = create_context(client, secrets, name, prompt)
     create_project_from_prompt(ctx)
-    
-    # Stage 1: Co-Generation from prompt (skip if --prove-only)
-    if not args.prove_only:
+    if not prove_only:
         run_stage_cogeneration(ctx)
     else:
-        log("=== Skipping Stage 1 (--prove-only) ===")
-        # Need to set equiv_state to pass proving stage checks
         ctx["equiv_state"]["last_status"] = "success"
         ctx["equiv_state"]["passed_runs"] = 5
-    
-    # Stage 2: Spec + Prove via Aristotle
     run_stage_proving(ctx)
-    
-    log(f"=== Project {args.project} Complete ===")
-
+    return True
 
 def main() -> None:
-    log("=== Anneal Universal Verification Agent (v3.0) ===")
     ensure_prelude_and_lockdown()
-    
     args = parse_args()
+    start_time = time.time()
+    success, error_msg, project_name, callback_url = False, None, None, None
     
-    # Clear environment if requested
-    if args.clear:
-        clear_environment(args.project)
-    
-    secrets = load_secrets()
-    client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
-
-    if args.prompt or args.prove_only:
-        run_prompt_mode(args, client, secrets)
-    else:
-        # Default: show help
-        log("No prompt provided. Use --prompt or --prompt-file.")
-        log("Example: python main.py --prompt 'Create a memory arena'")
-        log("Or: python main.py --project generated --prove-only")
-
-
+    try:
+        if is_gcp_mode():
+            from stages.gcp import fetch_job_params, update_job_status
+            job = fetch_job_params(GCP_JOB_ID, GCP_RESULTS_BUCKET)
+            prompt, project_name, callback_url = job["prompt"], job["project_name"], job.get("callback_url", "")
+            update_job_status(GCP_JOB_ID, GCP_RESULTS_BUCKET, "running")
+        else:
+            prompt, project_name = args.prompt, args.project
+        
+        if args.clear: clear_environment(project_name)
+        secrets = load_secrets()
+        client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
+        
+        if prompt or args.prove_only:
+            success = run_generation(prompt, project_name, args.prove_only, client, secrets)
+        else:
+            print("Usage: python main.py --prompt 'Create a memory arena'")
+            sys.exit(0)
+    except Exception as e:
+        log(f"ERROR: {e}")
+        error_msg = str(e)
+    finally:
+        duration = time.time() - start_time
+        if is_gcp_mode():
+            from stages.gcp import update_job_status, finalize_gcp_job
+            update_job_status(GCP_JOB_ID, GCP_RESULTS_BUCKET, "completed" if success else "failed", error_msg, duration)
+            finalize_gcp_job(GCP_JOB_ID, project_name or "x", success, duration, GCP_RESULTS_BUCKET, callback_url)
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

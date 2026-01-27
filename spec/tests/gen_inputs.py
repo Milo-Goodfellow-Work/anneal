@@ -1,21 +1,22 @@
 import random
 import sys
 
-def generate():
+def generate_test_case():
     n = random.randint(2, 100)
-    target = random.randint(-1000, 1000)
-    nums = [random.randint(-1000, 1000) for _ in range(n)]
+    nums = []
+    seen = set()
+    while len(nums) < n:
+        x = random.randint(-1000, 1000)
+        if x not in seen:
+            nums.append(x)
+            seen.add(x)
+            
+    i, j = random.sample(range(n), 2)
+    target = nums[i] + nums[j]
     
-    # Occasionally ensure there is a solution
-    if random.random() < 0.5:
-        idx1 = random.randint(0, n-1)
-        idx2 = random.randint(0, n-1)
-        while idx1 == idx2:
-            idx2 = random.randint(0, n-1)
-        target = nums[idx1] + nums[idx2]
-
-    print(f"{n} {target}")
+    print(n)
+    print(target)
     print(" ".join(map(str, nums)))
 
 if __name__ == "__main__":
-    generate()
+    generate_test_case()

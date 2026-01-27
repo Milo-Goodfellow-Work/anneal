@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "../../generated/generated/two_sum.c"
+#include "two_sum.c"
 
 int main() {
     int n;
@@ -17,9 +17,7 @@ int main() {
     int r1, r2;
     solve_two_sum(n, target, nums, &r1, &r2);
     
-    if (r1 == -1) {
-        printf("-1 -1\n");
-    } else if (r1 < r2) {
+    if (r1 < r2) {
         printf("%d %d\n", r1, r2);
     } else {
         printf("%d %d\n", r2, r1);

@@ -45,7 +45,6 @@ COPY spec/ ./spec/
 RUN cd /app/spec && lake exe cache get && lake build -v
 
 # Copy deploy scripts
-COPY deploy/job_runner.py ./deploy/
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
@@ -57,4 +56,4 @@ RUN mkdir -p /app/generated
 # USER anneal
 
 # Entrypoint runs the job runner
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ['python', 'main.py']

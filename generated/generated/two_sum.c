@@ -1,56 +1,53 @@
 #include "two_sum.h"
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
-    int64_t value;
-    int64_t index;
-} IndexedValue;
+    long long key;
+    int value;
+    int occupied;
+} HashEntry;
 
-static int compare_indexed_values(const void* a, const void* b) {
-    const IndexedValue* iv1 = (const IndexedValue*)a;
-    const IndexedValue* iv2 = (const IndexedValue*)b;
-    if (iv1->value < iv2->value) return -1;
-    if (iv1->value > iv2->value) return 1;
-    if (iv1->index < iv2->index) return -1;
-    if (iv1->index > iv2->index) return 1;
-    return 0;
+unsigned int hash(long long key, int size) {
+    unsigned long long k = (unsigned long long)key;
+    k ^= k >> 33;
+    k *= 0xff51afd7ed558ccdULL;
+    k ^= k >> 33;
+    k *= 0xc4ceb9fe1a85ec53ULL;
+    k ^= k >> 33;
+    return (unsigned int)(k % size);
 }
 
-TwoSumResult solve_two_sum(const int64_t* nums, int64_t nums_size, int64_t target) {
-    TwoSumResult result = {-1, -1};
-    if (nums_size < 2) return result;
+void solve_two_sum(int n, long long target, long long* nums, int* r1, int* r2) {
+    int size = n * 2 + 7;
+    HashEntry* table = (HashEntry*)calloc(size, sizeof(HashEntry));
+    
+    *r1 = -1;
+    *r2 = -1;
 
-    IndexedValue* indexed = (IndexedValue*)malloc(sizeof(IndexedValue) * nums_size);
-    if (!indexed) return result;
-
-    for (int64_t i = 0; i < nums_size; i++) {
-        indexed[i].value = nums[i];
-        indexed[i].index = i;
-    }
-
-    qsort(indexed, nums_size, sizeof(IndexedValue), compare_indexed_values);
-
-    int64_t l = 0;
-    int64_t r = nums_size - 1;
-
-    while (l < r) {
-        int64_t sum = indexed[l].value + indexed[r].value;
-        if (sum == target) {
-            if (indexed[l].index < indexed[r].index) {
-                result.index1 = indexed[l].index;
-                result.index2 = indexed[r].index;
-            } else {
-                result.index1 = indexed[r].index;
-                result.index2 = indexed[l].index;
+    for (int i = 0; i < n; i++) {
+        long long complement = target - nums[i];
+        unsigned int h = hash(complement, size);
+        
+        while (table[h].occupied) {
+            if (table[h].key == complement) {
+                *r1 = table[h].value;
+                *r2 = i;
+                free(table);
+                return;
             }
-            break;
-        } else if (sum < target) {
-            l++;
-        } else {
-            r--;
+            h = (h + 1) % size;
         }
+        
+        // Insert current
+        h = hash(nums[i], size);
+        while (table[h].occupied) {
+            h = (h + 1) % size;
+        }
+        table[h].key = nums[i];
+        table[h].value = i;
+        table[h].occupied = 1;
     }
-
-    free(indexed);
-    return result;
+    
+    free(table);
 }

@@ -264,11 +264,85 @@ resource "google_secret_manager_secret_iam_member" "aristotle_access" {
   member    = "serviceAccount:${google_cloud_run_v2_job.anneal_worker.template[0].template[0].service_account}"
 }
 
-# IAM - Allow Cloud Run to write to GCS
+# IAM - Allow Cloud Run to read/write to GCS (for job params and results)
 resource "google_storage_bucket_iam_member" "results_writer" {
   bucket = google_storage_bucket.anneal_results.name
-  role   = "roles/storage.objectCreator"
+  role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_cloud_run_v2_job.anneal_worker.template[0].template[0].service_account}"
+}
+
+# ============================================================
+# Cloud Function - Pub/Sub Trigger for Jobs
+# ============================================================
+
+# Service account for the Cloud Function
+resource "google_service_account" "trigger_function" {
+  account_id   = "anneal-trigger-function"
+  display_name = "Anneal Trigger Function"
+}
+
+# IAM - Allow function to execute Cloud Run Jobs
+resource "google_cloud_run_v2_job_iam_member" "function_invoker" {
+  name     = google_cloud_run_v2_job.anneal_worker.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.trigger_function.email}"
+}
+
+# Storage bucket for function source
+resource "google_storage_bucket" "function_source" {
+  name          = "${var.project_id}-anneal-functions"
+  location      = var.region
+  force_destroy = true
+  
+  uniform_bucket_level_access = true
+}
+
+# Cloud Function (Gen 2)
+resource "google_cloudfunctions2_function" "trigger_job" {
+  name     = "anneal-trigger-job"
+  location = var.region
+  
+  build_config {
+    runtime     = "python311"
+    entry_point = "trigger_anneal_job"
+    
+    source {
+      storage_source {
+        bucket = google_storage_bucket.function_source.name
+        object = google_storage_bucket_object.function_source.name
+      }
+    }
+  }
+  
+  service_config {
+    min_instance_count = 0
+    max_instance_count = 10
+    timeout_seconds    = 60
+    
+    environment_variables = {
+      GCP_PROJECT    = var.project_id
+      REGION         = var.region
+      JOB_NAME       = google_cloud_run_v2_job.anneal_worker.name
+      RESULTS_BUCKET = google_storage_bucket.anneal_results.name
+    }
+    
+    service_account_email = google_service_account.trigger_function.email
+  }
+  
+  event_trigger {
+    trigger_region = var.region
+    event_type     = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic   = google_pubsub_topic.anneal_jobs.id
+    retry_policy   = "RETRY_POLICY_RETRY"
+  }
+}
+
+# Upload function source (placeholder - needs to be zipped before apply)
+resource "google_storage_bucket_object" "function_source" {
+  name   = "trigger_job/source.zip"
+  bucket = google_storage_bucket.function_source.name
+  source = "${path.module}/../functions/trigger_job.zip"
 }
 
 # ============================================================
@@ -290,3 +364,8 @@ output "cloud_run_job" {
 output "vpc_connector" {
   value = google_vpc_access_connector.anneal_connector.name
 }
+
+output "trigger_function" {
+  value = google_cloudfunctions2_function.trigger_job.name
+}
+
