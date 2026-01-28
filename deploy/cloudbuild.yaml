@@ -16,7 +16,7 @@ steps:
       - '-t'
       - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/anneal:latest'
       - '-f'
-      - 'deploy/Dockerfile.gcp'
+      - 'Dockerfile'
       - '.'
     timeout: '3600s'  # 1 hour - Mathlib build takes time
 

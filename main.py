@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """Anneal - Universal Verification Agent. Generates verified C code from prompts."""
-import argparse, os, shutil, traceback, tomllib
+import argparse, os, traceback, tomllib
 from pathlib import Path
-
-# Copy templates to working directories at startup
-TEMPLATE_DIR = Path(__file__).parent / "template"
-for name in ["spec", "generated"]:
-    if (TEMPLATE_DIR / name).exists():
-        shutil.rmtree(name, ignore_errors=True)
-        shutil.copytree(TEMPLATE_DIR / name, name)
 
 from google import genai
 from helpers import log, SECRETS_FILE, DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN
