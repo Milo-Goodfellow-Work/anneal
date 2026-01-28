@@ -12,7 +12,7 @@ def run_stage_cogeneration(ctx: dict) -> None:
     """Run co-generation: generate implementation + Lean from prompt."""
     log("=== Stage 1: Co-Generation ===")
     
-    prompt = ctx.get("prompt", "No prompt provided")
+    prompt = ctx["prompt"]
     instructions = base_instructions_prompt_cogen(prompt)
     payload = (
         f"TASK: Generate a C implementation AND equivalent Lean code\n\n"
@@ -29,10 +29,10 @@ def run_stage_cogeneration(ctx: dict) -> None:
     if not out.startswith("Build Success"):
         raise RuntimeError(f"Build fails after co-generation: {out}")
     
-    if ctx["equiv_state"].get("last_status") != "success":
+    if ctx["equiv_state"]["last_status"] != "success":
         raise RuntimeError("Co-generation ended without passing differential tests")
-    if ctx["equiv_state"].get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
-        raise RuntimeError(f"Insufficient test runs: {ctx['equiv_state'].get('passed_runs', 0)} < {DIFF_REQUIRED_RUNS}")
+    if ctx["equiv_state"]["passed_runs"] < DIFF_REQUIRED_RUNS:
+        raise RuntimeError(f"Insufficient test runs: {ctx['equiv_state']['passed_runs']} < {DIFF_REQUIRED_RUNS}")
     
     log("=== Stage 1 Complete ===")
 

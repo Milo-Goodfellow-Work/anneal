@@ -12,7 +12,6 @@ for name in ["spec", "generated"]:
 
 from google import genai
 from helpers import log, SECRETS_FILE, DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN
-from stages.scaffold import init_project
 from stages.cogeneration import run_stage_cogeneration
 from stages.proving import run_stage_proving
 from stages.gcp import fetch_job_params, update_job_status, finalize_gcp_job
@@ -37,20 +36,18 @@ def create_context(client, secrets, prompt: str) -> dict:
                        "min_cases_per_run": DIFF_MIN_CASES_PER_RUN, "last_status": "unknown"},
     }
 
-def run_generation(prompt: str, prove_only: bool, client, secrets) -> bool:
+def run_generation(prompt: str, prove_only: bool, client, secrets) -> None:
     ctx = create_context(client, secrets, prompt)
-    init_project(ctx)
     if not prove_only:
         run_stage_cogeneration(ctx)
     else:
         ctx["equiv_state"]["last_status"] = "success"
         ctx["equiv_state"]["passed_runs"] = 5
     run_stage_proving(ctx)
-    return True
 
 def main() -> None:
-    success, error_msg = False, None
-
+    prove_only, success, error_msg = False, True, None
+    
     # GCP mode: secrets from env vars, prompt from GCS job params
     if GCP_MODE:
         gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -72,18 +69,19 @@ def main() -> None:
         
         prompt = args.prompt
         callback_url = None
-        if not prompt and not args.prove_only:
+        prove_only = args.prove_only
+        if not prompt and not prove_only:
             print("Usage: python main.py --prompt 'Create a memory arena'")
             return
     
     client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
     
     try:
-        success = run_generation(prompt, args.prove_only, client, secrets)
+        run_generation(prompt, prove_only, client, secrets)
     except Exception as e:
         log(f"ERROR: {e}")
         traceback.print_exc()
-        error_msg = str(e)
+        success, error_msg = False, str(e)
     
     if GCP_MODE:
         update_job_status(GCP_JOB_ID, GCP_RESULTS_BUCKET, "completed" if success else "failed", error_msg)

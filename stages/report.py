@@ -22,7 +22,7 @@ def generate_report(ctx: dict) -> str:
     """Generate unified report and test data files."""
     
     # Get test results from context
-    equiv_state = ctx.get("equiv_state", {})
+    equiv_state = ctx["equiv_state"]
     last_report = equiv_state.get("last_report", {})
     
     # Extract API info from headers (functions + structs)
@@ -107,7 +107,7 @@ def _extract_api_info(ctx: dict) -> Dict[str, Any]:
 
 def _get_test_data(ctx: dict) -> Dict[str, Any]:
     """Get test data from context (stored by diff_test)."""
-    equiv_state = ctx.get("equiv_state", {})
+    equiv_state = ctx["equiv_state"]
     return equiv_state.get("test_data", {
         "seeds": [],
         "total_cases": 0,

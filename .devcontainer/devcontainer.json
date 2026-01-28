@@ -1,6 +1,12 @@
 {
   "name": "Rust-Lean-LLM Dev",
   "image": "rust-lean-llm-dev",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/mnt/source,type=bind,readonly",
+    "source=anneal-workspace,target=/workspace,type=volume"
+  ],
+  "postCreateCommand": "bash -c 'if [ ! -d /workspace/.git ]; then echo \"Cloning from /mnt/source...\"; cp -a /mnt/source/. /workspace/; else echo \"Workspace already initialized\"; fi'",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -9,6 +15,5 @@
         "google.geminicodeassist"
       ]
     }
-  },
-  "postCreateCommand": "bash -c 'rm -rf /workspaces/anneal/spec/.lake 2>/dev/null; ln -sf /opt/spec/.lake /workspaces/anneal/spec/.lake; echo \"Spec .lake symlinked to /opt/spec/.lake for fast native I/O\"'"
+  }
 }

@@ -51,11 +51,11 @@ def persist_equiv_report_if_success(ctx: dict) -> None:
         Path(ctx["equiv_report_rel"]).write_text(json.dumps(rep, indent=2))
 
 def can_submit_current_stage(ctx: dict) -> Tuple[bool, str]:
-    if not run_lake_build(ctx["spec_pkg_root"]).startswith("Build Success"):
+    if not run_lake_build(SPEC_DIR).startswith("Build Success"):
         return False, "Build failed"
-    if ctx["equiv_state"].get("last_status") != "success":
+    if ctx["equiv_state"]["last_status"] != "success":
         return False, "Differential tests not passed"
-    if ctx["equiv_state"].get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
+    if ctx["equiv_state"]["passed_runs"] < DIFF_REQUIRED_RUNS:
         return False, f"Need {DIFF_REQUIRED_RUNS} passing runs"
     return True, ""
 

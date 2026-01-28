@@ -1,22 +1,14 @@
-import random
+#!/usr/bin/env python3
+import argparse, random
 
-def generate_test_case():
-    n = random.randint(2, 100)
-    nums = [random.randint(-1000, 1000) for _ in range(n)]
-    
-    # Ensure there is a solution sometimes, or just pick two indices
-    if random.choice([True, False]):
-        i, j = random.sample(range(n), 2)
-        target = nums[i] + nums[j]
-    else:
-        target = random.randint(-2000, 2000)
-        
-    print(n)
-    for x in nums:
-        print(x)
-    print(target)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--seed', type=int, required=True)
+    ap.add_argument('--n', type=int, required=True)
+    args = ap.parse_args()
+    random.seed(args.seed)
+    for _ in range(args.n):
+        print('NOOP')
 
-if __name__ == "__main__":
-    # Generate 10 test cases
-    for _ in range(10):
-        generate_test_case()
+if __name__ == '__main__':
+    main()
