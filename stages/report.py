@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from helpers import (
-    log, _read_text_file, _write_text_file, SPEC_REPORTS_DIR,
+    log, _read_text_file, _write_text_file, SPEC_REPORTS_DIR, SPEC_SRC_DIR,
     DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
 )
 
@@ -47,9 +47,7 @@ def generate_report(ctx: dict) -> str:
 
 def _extract_api_info(ctx: dict) -> Dict[str, Any]:
     """Extract functions and structs from C headers."""
-    source_root = ctx.get("source_root", Path("generated/generated"))
-    if isinstance(source_root, str):
-        source_root = Path(source_root)
+    source_root = Path("generated")
     
     functions = []
     structs = []
@@ -130,7 +128,7 @@ def _build_unified_report(
     total_time = summary.get("total_time_s", 0) if isinstance(summary, dict) else 0
     
     # Check for formal proofs
-    verif_path = ctx.get("spec_src_root", Path("spec/Src")) / "Verif.lean"
+    verif_path = SPEC_SRC_DIR / "Verif.lean"
     has_proofs = verif_path.exists() and "sorry" not in _read_text_file(verif_path)
     
     status = "✅ VERIFIED" if passed >= required else "❌ FAILED"

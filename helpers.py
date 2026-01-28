@@ -37,17 +37,33 @@ LOCKED_LEAN_FILENAMES = {"Prelude.lean"}
 def log(msg: str) -> None:
     print(f"[Anneal] {msg}", flush=True)
 
-def load_secrets() -> dict:
-    if SECRETS_FILE.exists():
-        with SECRETS_FILE.open("rb") as f:
-            return tomllib.load(f)
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        secrets = {"GEMINI_API_KEY": gemini_key}
-        if k := os.environ.get("ARISTOTLE_API_KEY"):
-            secrets["ARISTOTLE_API_KEY"] = k
-        return {"secrets": secrets}
-    raise FileNotFoundError(f"{SECRETS_FILE} not found and GEMINI_API_KEY not in env")
+def is_writable(path: str) -> bool:
+    """Check if a file path is writable by the model.
+    
+    Rules:
+    - generated/: any file allowed
+    - spec/Src/*.lean: allowed except Prelude.lean
+    - spec/Src/tests/Harness.lean: allowed
+    - spec/tests/gen_inputs.py, harness.c: allowed
+    """
+    path = path.replace("\\", "/").lstrip("/").lstrip("./")
+    
+    # C code goes anywhere in generated/
+    if path.startswith("generated/"):
+        return True
+    
+    # Lean files in spec/Src/ (but not Prelude)
+    if path.startswith("spec/Src/") or not "/" in path:  # relative lean paths
+        if path.endswith("Prelude.lean") or path == "Prelude.lean":
+            return False
+        if path.endswith(".lean"):
+            return True
+    
+    # Test harnesses
+    if path in {"spec/tests/gen_inputs.py", "spec/tests/harness.c"}:
+        return True
+    
+    return False
 
 def list_project_files(base_dir: Path) -> List[str]:
     if not base_dir.exists(): return []

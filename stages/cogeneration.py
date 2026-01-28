@@ -1,7 +1,7 @@
 """Stage 1: Co-Generation - Generate C implementation + Lean from prompt."""
 from __future__ import annotations
 from typing import List
-from helpers import log, run_lake_build, DIFF_REQUIRED_RUNS
+from helpers import log, run_lake_build, SPEC_DIR, DIFF_REQUIRED_RUNS
 from stages.llm import responses_create, execute_tool_call
 from stages.prompts import base_instructions_prompt_cogen
 from stages.diff_test import run_differential_test_impl
@@ -11,14 +11,13 @@ MAX_TURNS = 64
 def run_stage_cogeneration(ctx: dict) -> None:
     """Run co-generation: generate implementation + Lean from prompt."""
     log("=== Stage 1: Co-Generation ===")
-    ctx["current_stage"] = "COGENERATION"
     
-    instructions = base_instructions_prompt_cogen(ctx)
     prompt = ctx.get("prompt", "No prompt provided")
+    instructions = base_instructions_prompt_cogen(prompt)
     payload = (
         f"TASK: Generate a C implementation AND equivalent Lean code\n\n"
         f"SPECIFICATION:\n{prompt}\n\n"
-        f"Write C code in {ctx['source_root']}/, Lean in spec/Src/Main.lean.\n"
+        f"Write C code in generated/, Lean in spec/Src/Main.lean.\n"
         f"Include test harnesses. Run differential tests until they pass, then call submit_stage.\n"
     )
     
@@ -26,7 +25,7 @@ def run_stage_cogeneration(ctx: dict) -> None:
     if not ok:
         raise RuntimeError("Co-generation did not complete")
     
-    out = run_lake_build(ctx["spec_pkg_root"])
+    out = run_lake_build(SPEC_DIR)
     if not out.startswith("Build Success"):
         raise RuntimeError(f"Build fails after co-generation: {out}")
     

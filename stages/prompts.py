@@ -1,31 +1,27 @@
 """Prompt builders for LLM."""
 from __future__ import annotations
-from pathlib import Path
-from helpers import SPEC_DIR, SPEC_SRC_DIR, list_lean_files, list_project_files
+from helpers import SPEC_SRC_DIR
 
-def _files_list(ctx: dict, key: str) -> str:
-    return "\n".join(sorted(ctx.get(key, set())))
-
-def base_instructions_prompt_cogen(ctx: dict) -> str:
-    prompt = ctx.get("prompt", "")
-    
+def base_instructions_prompt_cogen(prompt: str) -> str:
     return f"""ROLE: Co-Generation Engine - generate C implementation AND Lean 4 equivalent.
 SETTING: SAFETY-CRITICAL. Correctness mandatory. No placeholders/stubs.
 
-IMPLEMENTATION DIR: {ctx['source_root']}
-LEAN DIR: {ctx['spec_src_root']}/
+IMPLEMENTATION DIR: generated/
+LEAN DIR: spec/Src/
 
-WRITABLE LEAN FILES:
-{_files_list(ctx, 'allowed_lean_writes')}
+WRITABLE FILES:
+- generated/*.c, generated/*.h (C implementation)
+- spec/Src/Main.lean, spec/Src/Module*.lean (Lean implementation)
+- spec/Src/tests/Harness.lean (test harness)
+- spec/tests/gen_inputs.py, spec/tests/harness.c (test generators)
 
-WRITABLE TEXT FILES:
-{_files_list(ctx, 'allowed_text_writes')}
+LOCKED: spec/Src/Prelude.lean (do not modify)
 
 SPECIFICATION:
 {prompt}
 
 DELIVERABLES:
-1. C implementation in {ctx['source_root']}/
+1. C implementation in generated/
 2. Lean 4 definitions in spec/Src/Main.lean
 3. Test generator: spec/tests/gen_inputs.py
 4. C harness: spec/tests/harness.c

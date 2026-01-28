@@ -4,8 +4,8 @@ import json, time
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 from google.genai import types
-from helpers import (log, run_lake_build, run_lake_build_target, validate_basic_lean_shape, 
-                     MODEL_ID, TOOLS_SCHEMA, MAX_TOOL_READ_CHARS, DIFF_REQUIRED_RUNS)
+from helpers import (log, run_lake_build, run_lake_build_target, validate_basic_lean_shape, is_writable,
+                     MODEL_ID, TOOLS_SCHEMA, MAX_TOOL_READ_CHARS, DIFF_REQUIRED_RUNS, SPEC_DIR, SPEC_SRC_DIR)
 
 class RestartTranslationError(Exception):
     def __init__(self, reason: str):
@@ -75,32 +75,30 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
 
         if fname == "read_source_file":
             rel = _safe_relpath(args["path"])
-            p = ctx["source_root"] / rel
+            p = Path("generated") / rel
             if p.exists() and p.is_file():
                 return tool_output_item(call_id, p.read_text()[:MAX_TOOL_READ_CHARS]), True
             return tool_output_item(call_id, f"Error: Not found {rel}"), True
 
         if fname == "read_lean_file":
             rel = _safe_relpath(args["path"])
-            p = ctx["spec_src_root"] / rel
+            p = SPEC_SRC_DIR / rel
             if p.exists() and p.is_file():
                 return tool_output_item(call_id, p.read_text()[:MAX_TOOL_READ_CHARS]), True
             return tool_output_item(call_id, f"Error: Not found {rel}"), True
 
         if fname == "write_lean_file":
             rel = _safe_relpath(args["path"])
-            if rel in ctx["locked_lean_paths"]:
-                log(f"  ✗ Write denied: {rel} (locked)")
-                return tool_output_item(call_id, f"Denied: {rel} is locked"), False
-            if rel not in ctx["allowed_lean_writes"]:
-                log(f"  ✗ Write denied: {rel} (not in writable set)")
-                return tool_output_item(call_id, f"Denied: {rel} not in writable set"), False
+            full_path = f"spec/Src/{rel}"
+            if not is_writable(full_path):
+                log(f"  ✗ Write denied: {rel}")
+                return tool_output_item(call_id, f"Denied: {rel} not writable"), False
             content = args.get("content", "")
             ok, reason = validate_basic_lean_shape(rel, content)
             if not ok:
                 log(f"  ✗ Rejected: {rel} - {reason}")
                 return tool_output_item(call_id, f"Rejected: {reason}"), False
-            p = ctx["spec_src_root"] / rel
+            p = SPEC_SRC_DIR / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
             log(f"  ✓ Wrote {rel} ({len(content)} chars)")
@@ -108,9 +106,8 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
 
         if fname == "write_text_file":
             rel = _safe_relpath(args["path"])
-            allowed = rel in ctx["allowed_text_writes"] or rel.startswith("generated/")
-            if not allowed:
-                return tool_output_item(call_id, f"Denied: {rel} not allowed"), False
+            if not is_writable(rel):
+                return tool_output_item(call_id, f"Denied: {rel} not writable"), False
             content = args.get("content", "")
             if not content.strip():
                 return tool_output_item(call_id, "Rejected: empty content"), False
@@ -121,7 +118,7 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
 
         if fname == "verify_build":
             log("  [Build] lake build...")
-            out = run_lake_build(ctx["spec_pkg_root"])
+            out = run_lake_build(SPEC_DIR)
             if out.startswith("Build Success"):
                 log("  ✓ Build Success")
             else:

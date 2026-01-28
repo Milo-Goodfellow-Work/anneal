@@ -1,4 +1,4 @@
-#include "../generated/solution.h"
+#include "../../generated/two_sum.h"
 
 int main() {
     solve_two_sum();

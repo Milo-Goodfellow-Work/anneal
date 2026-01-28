@@ -15,7 +15,7 @@ def fetch_job_params(job_id: str, bucket: str) -> dict:
         raise ValueError(f"Job {job_id} missing prompt")
     return params
 
-def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str] = None, duration: Optional[float] = None) -> dict:
+def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str] = None) -> dict:
     """Update job status in GCS."""
     from google.cloud import storage
     blob = storage.Client().bucket(bucket).blob(f"jobs/{job_id}.json")
@@ -26,7 +26,6 @@ def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str
         params["started_at"] = datetime.now().isoformat()
     elif status in ("completed", "failed"):
         params["finished_at"] = datetime.now().isoformat()
-        if duration: params["duration_seconds"] = duration
         if error: params["error"] = error
     blob.upload_from_string(json.dumps(params, indent=2))
     return params
@@ -41,7 +40,7 @@ def _collect_files() -> list[Path]:
         files.extend(f for f in reports.glob("*") if f.is_file())
     return files
 
-def upload_results(job_id: str, bucket: str, success: bool, duration: float) -> dict:
+def upload_results(job_id: str, bucket: str, success: bool) -> dict:
     """Upload results to GCS."""
     from google.cloud import storage
     bkt = storage.Client().bucket(bucket)
@@ -49,7 +48,7 @@ def upload_results(job_id: str, bucket: str, success: bool, duration: float) -> 
     for f in files:
         bkt.blob(f"{job_id}/{f}").upload_from_filename(str(f))
     status = {"job_id": job_id, "status": "completed" if success else "failed",
-              "files_uploaded": len(files), "duration_seconds": duration, "completed_at": datetime.now().isoformat()}
+              "files_uploaded": len(files), "completed_at": datetime.now().isoformat()}
     bkt.blob(f"{job_id}/status.json").upload_from_string(json.dumps(status, indent=2))
     return status
 
@@ -64,10 +63,9 @@ def call_webhook(url: str, job_id: str, status: dict, bucket: Optional[str] = No
     except urllib.error.URLError:
         pass
 
-def finalize_gcp_job(job_id: str, success: bool, duration: float, 
-                     bucket: Optional[str] = None, callback_url: Optional[str] = None, **_):
+def finalize_gcp_job(job_id: str, success: bool, bucket: Optional[str] = None, callback_url: Optional[str] = None):
     if not bucket: return
-    status = upload_results(job_id, bucket, success, duration)
+    status = upload_results(job_id, bucket, success)
     if callback_url:
         call_webhook(callback_url, job_id, status, bucket)
     return status
