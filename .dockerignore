@@ -12,3 +12,7 @@
 **/*.so
 **/.venv
 **/venv
+secrets.toml
+template/
+deploy/
+rebuild.bat
