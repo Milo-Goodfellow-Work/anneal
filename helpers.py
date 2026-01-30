@@ -19,10 +19,8 @@ MODEL_ID = "gemini-3-flash-preview"
 MAX_TOOL_READ_CHARS = 80_000
 MAX_SESSION_TURNS = 16
 
-DIFF_REQUIRED_RUNS = 5
-DIFF_MIN_CASES_PER_RUN = 5
+DIFF_TOTAL_CASES = 25
 DIFF_SEED_START = 1
-DIFF_MIN_OUTPUT_RATIO = 0.75
 
 GEN_TIMEOUT_S = 8
 C_RUN_TIMEOUT_S = 8
@@ -36,6 +34,13 @@ LOCKED_LEAN_FILENAMES = {"Prelude.lean"}
 
 def log(msg: str) -> None:
     print(f"[Anneal] {msg}", flush=True)
+
+def _read_text_file(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
+
+def _write_text_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
 
 def is_writable(path: str) -> bool:
     """Check if a file path is writable by the model.

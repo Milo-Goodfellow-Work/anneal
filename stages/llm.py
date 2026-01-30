@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, Optional, List
 from google.genai import types
 from helpers import (log, run_lake_build, run_lake_build_target, validate_basic_lean_shape, is_writable,
-                     MODEL_ID, TOOLS_SCHEMA, MAX_TOOL_READ_CHARS, DIFF_REQUIRED_RUNS, SPEC_DIR, SPEC_SRC_DIR)
+                     MODEL_ID, TOOLS_SCHEMA, MAX_TOOL_READ_CHARS, SPEC_DIR, SPEC_SRC_DIR)
 
 class RestartTranslationError(Exception):
     def __init__(self, reason: str):
@@ -45,18 +45,12 @@ def update_test_state_from_report(ctx: dict, report_json: str) -> None:
         ctx["equiv_state"]["last_status"] = "malformed"
         ctx["equiv_state"]["passed_runs"] = 0
 
-def persist_equiv_report_if_success(ctx: dict) -> None:
-    rep = ctx["equiv_state"].get("last_report")
-    if isinstance(rep, dict) and rep.get("status") == "success":
-        Path(ctx["equiv_report_rel"]).write_text(json.dumps(rep, indent=2))
 
 def can_submit_current_stage(ctx: dict) -> Tuple[bool, str]:
     if not run_lake_build(SPEC_DIR).startswith("Build Success"):
         return False, "Build failed"
     if ctx["equiv_state"]["last_status"] != "success":
         return False, "Differential tests not passed"
-    if ctx["equiv_state"]["passed_runs"] < DIFF_REQUIRED_RUNS:
-        return False, f"Need {DIFF_REQUIRED_RUNS} passing runs"
     return True, ""
 
 def _safe_relpath(p: str) -> str:
@@ -117,6 +111,19 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
             return tool_output_item(call_id, f"Written to {p}"), True
 
         if fname == "verify_build":
+            # Compile C sources first
+            import subprocess
+            gen_dir = Path("generated")
+            c_files = list(gen_dir.glob("*.c")) if gen_dir.exists() else []
+            if c_files:
+                log(f"  [Build] compiling {len(c_files)} C file(s)...")
+                for src in c_files:
+                    r = subprocess.run(["gcc", "-fsyntax-only", "-Wall", str(src)], capture_output=True, text=True)
+                    if r.returncode != 0:
+                        log(f"  ✗ C compile failed: {src.name}")
+                        return tool_output_item(call_id, f"C compile error in {src.name}:\n{r.stderr[:1500]}"), True
+                log("  ✓ C syntax OK")
+            
             log("  [Build] lake build...")
             out = run_lake_build(SPEC_DIR)
             if out.startswith("Build Success"):
@@ -128,14 +135,15 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
         if fname == "run_differential_test":
             out_json = run_differential_test_impl(ctx, args)
             update_test_state_from_report(ctx, out_json)
-            persist_equiv_report_if_success(ctx)
             return tool_output_item(call_id, out_json), True
 
         if fname == "submit_stage":
             ok, why = can_submit_current_stage(ctx)
             if not ok:
                 return tool_output_item(call_id, f"Denied: {why}"), False
-            return tool_output_item(call_id, f"Stage Submitted: {args.get('summary', '')}"), True
+            summary = args.get('summary', '')
+            ctx["equiv_state"]["submit_summary"] = summary
+            return tool_output_item(call_id, f"Stage Submitted: {summary}"), True
 
         return tool_output_item(call_id, f"Unknown tool: {fname}"), True
 

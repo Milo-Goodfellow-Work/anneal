@@ -1,7 +1,7 @@
 """Stage 1: Co-Generation - Generate C implementation + Lean from prompt."""
 from __future__ import annotations
 from typing import List
-from helpers import log, run_lake_build, SPEC_DIR, DIFF_REQUIRED_RUNS
+from helpers import log, run_lake_build, SPEC_DIR
 from stages.llm import responses_create, execute_tool_call
 from stages.prompts import base_instructions_prompt_cogen
 from stages.diff_test import run_differential_test_impl
@@ -31,8 +31,6 @@ def run_stage_cogeneration(ctx: dict) -> None:
     
     if ctx["equiv_state"]["last_status"] != "success":
         raise RuntimeError("Co-generation ended without passing differential tests")
-    if ctx["equiv_state"]["passed_runs"] < DIFF_REQUIRED_RUNS:
-        raise RuntimeError(f"Insufficient test runs: {ctx['equiv_state']['passed_runs']} < {DIFF_REQUIRED_RUNS}")
     
     log("=== Stage 1 Complete ===")
 

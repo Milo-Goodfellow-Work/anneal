@@ -4,7 +4,7 @@ import argparse, os, traceback, tomllib
 from pathlib import Path
 
 from google import genai
-from helpers import log, SECRETS_FILE, DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN
+from helpers import log, SECRETS_FILE, DIFF_TOTAL_CASES
 from stages.cogeneration import run_stage_cogeneration
 from stages.proving import run_stage_proving
 from stages.gcp import fetch_job_params, update_job_status, finalize_gcp_job
@@ -25,8 +25,7 @@ def create_context(client, secrets, prompt: str) -> dict:
         "prompt": prompt,
         "client": client,
         "secrets": secrets,
-        "equiv_state": {"last_report": None, "passed_runs": 0, "required_runs": DIFF_REQUIRED_RUNS,
-                       "min_cases_per_run": DIFF_MIN_CASES_PER_RUN, "last_status": "unknown"},
+        "equiv_state": {"last_report": None, "total_cases": DIFF_TOTAL_CASES, "last_status": "unknown"},
     }
 
 def run_generation(prompt: str, prove_only: bool, client, secrets) -> None:

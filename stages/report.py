@@ -14,35 +14,25 @@ from typing import Dict, List, Any, Optional
 
 from helpers import (
     log, _read_text_file, _write_text_file, SPEC_REPORTS_DIR, SPEC_SRC_DIR,
-    DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
 )
 
 
 def generate_report(ctx: dict) -> str:
-    """Generate unified report and test data files."""
+    """Generate test data file."""
     
     # Get test results from context
     equiv_state = ctx["equiv_state"]
-    last_report = equiv_state.get("last_report", {})
-    
-    # Extract API info from headers (functions + structs)
-    api_info = _extract_api_info(ctx)
     
     # Get test data
     test_data = _get_test_data(ctx)
     
     # Write test data JSON
     tests_path = SPEC_REPORTS_DIR / "tests.json"
-    _write_text_file(tests_path, json.dumps(test_data, indent=2))
+    SPEC_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    tests_path.write_text(json.dumps(test_data, indent=2))
     log(f"Generated test data at {tests_path}")
     
-    # Build and write unified report
-    report_path = SPEC_REPORTS_DIR / "report.md"
-    report_content = _build_unified_report(ctx, api_info, test_data, last_report)
-    _write_text_file(report_path, report_content)
-    log(f"Generated report at {report_path}")
-    
-    return str(report_path)
+    return str(tests_path)
 
 
 def _extract_api_info(ctx: dict) -> Dict[str, Any]:
@@ -108,111 +98,14 @@ def _extract_api_info(ctx: dict) -> Dict[str, Any]:
 def _get_test_data(ctx: dict) -> Dict[str, Any]:
     """Get test data from context (stored by diff_test)."""
     equiv_state = ctx["equiv_state"]
-    return equiv_state.get("test_data", {
-        "seeds": [],
+    data = equiv_state.get("test_data", {
+        "cases": [],
         "total_cases": 0,
         "all_pass": False,
     })
-
-
-def _build_unified_report(
-    ctx: dict,
-    api_info: Dict[str, Any],
-    test_data: Dict[str, Any],
-    summary: Dict[str, Any],
-) -> str:
-    """Build the unified report markdown."""
-    
-    passed = summary.get("passed_runs", 0) if isinstance(summary, dict) else 0
-    required = summary.get("required_runs", DIFF_REQUIRED_RUNS) if isinstance(summary, dict) else DIFF_REQUIRED_RUNS
-    total_time = summary.get("total_time_s", 0) if isinstance(summary, dict) else 0
-    
-    # Check for formal proofs
-    verif_path = SPEC_SRC_DIR / "Verif.lean"
-    has_proofs = verif_path.exists() and "sorry" not in _read_text_file(verif_path)
-    
-    status = "✅ VERIFIED" if passed >= required else "❌ FAILED"
-    
-    report = f"""# Verification Report
-
-**Status:** {status}  
-**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M")}
-
----
-
-## Summary
-
-| Metric | Value |
-|--------|-------|
-| Differential Tests | {passed}/{required} seeds passed |
-| Total Test Time | {total_time:.1f}s |
-| Formal Proofs | {"✅ Complete" if has_proofs else "⏳ Pending"} |
-
----
-
-## API
-
-"""
-    
-    # List structs first (if any function returns a custom type)
-    structs = api_info.get("structs", [])
-    functions = api_info.get("functions", [])
-    
-    # Find which structs are used as return types
-    return_types = {f["return"] for f in functions}
-    relevant_structs = [s for s in structs if s["name"] in return_types]
-    
-    for sig in functions:
-        report += f"### `{sig['name']}`\n\n"
-        report += f"**Returns:** `{sig['return']}`\n\n"
-        
-        if sig['params']:
-            report += "**Parameters:**\n"
-            for p in sig['params']:
-                report += f"- `{p}`\n"
-        else:
-            report += "**Parameters:** none\n"
-        
-        # If return type is a struct, show its definition
-        matching_struct = next((s for s in structs if s["name"] == sig["return"]), None)
-        if matching_struct:
-            report += f"\n**Return Type Definition:**\n```c\ntypedef struct {{\n"
-            for field in matching_struct["fields"]:
-                report += f"    {field};\n"
-            report += f"}} {matching_struct['name']};\n```\n"
-        
-        report += "\n"
-    
-    if not functions:
-        report += "*No function signatures extracted*\n\n"
-    
-    # Test results
-    report += "---\n\n## Test Results\n\n"
-    
-    seeds = test_data.get("seeds", [])
-    if seeds:
-        for seed_data in seeds:
-            seed = seed_data.get("seed", "?")
-            cases = seed_data.get("cases", [])
-            all_pass = all(c.get("match", False) for c in cases)
-            
-            report += f"### Seed {seed} {'✅' if all_pass else '❌'}\n\n"
-            report += "| # | C Output | Lean Output | Match |\n"
-            report += "|---|----------|-------------|-------|\n"
-            
-            for i, case in enumerate(cases, 1):
-                c_out = case.get("c", "-")
-                lean_out = case.get("lean", "-")
-                match = "✓" if case.get("match", False) else "✗"
-                report += f"| {i} | `{c_out}` | `{lean_out}` | {match} |\n"
-            
-            report += "\n"
-    else:
-        report += "*No test data recorded*\n"
-    
-    report += "---\n\n*Generated by Anneal Verification Agent*\n"
-    
-    return report
+    # Include comment from submit_stage summary
+    data["comment"] = equiv_state.get("submit_summary", "")
+    return data
 
 
 # For backwards compatibility

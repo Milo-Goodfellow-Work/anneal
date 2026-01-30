@@ -26,6 +26,10 @@ DELIVERABLES:
 3. Test generator: spec/tests/gen_inputs.py
 4. C harness: spec/tests/harness.c
 5. Lean harness: spec/Src/tests/Harness.lean
+6. Test description: When you call submit_stage, include in your summary a "comment" explaining:
+   - What everyday data types the program takes as input (e.g., "two integers")
+   - What it returns as output (e.g., "one integer: their sum")
+   - How to read each test case in the report
 
 LEAN 4 IO:
   let stdin ← IO.getStdin
@@ -37,8 +41,11 @@ PROCESS:
 2. Read Main.lean back to confirm names
 3. Write Harness.lean with exact names
 4. Run differential tests
-5. Fix mismatches until tests pass
-6. Call submit_stage
+5. CRITICAL: Review the differential test output manually. Verify that the output is CORRECT according to the specification, not just that C and Lean match.
+   - If both produce the same WRONG answer, you must fix both.
+   - Check edge cases manually.
+6. Fix mismatches or incorrect logic until tests pass AND are correct
+7. Call submit_stage
 
 RULES:
 - NO 'sorry' anywhere
