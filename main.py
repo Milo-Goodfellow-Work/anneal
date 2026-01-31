@@ -35,7 +35,7 @@ def run_generation(prompt: str, prove_only: bool, client, secrets) -> None:
     else:
         ctx["equiv_state"]["last_status"] = "success"
         ctx["equiv_state"]["passed_runs"] = 5
-    run_stage_proving(ctx)
+    return run_stage_proving(ctx)
 
 def main() -> None:
     prove_only, success, error_msg = False, True, None
@@ -68,15 +68,20 @@ def main() -> None:
     
     client = genai.Client(api_key=secrets["secrets"]["GEMINI_API_KEY"])
     
+    aristotle_id = None
     try:
-        run_generation(prompt, prove_only, client, secrets)
+        aristotle_id = run_generation(prompt, prove_only, client, secrets)
     except Exception as e:
         log(f"ERROR: {e}")
         traceback.print_exc()
         success, error_msg = False, str(e)
     
     if GCP_MODE:
-        update_job_status(GCP_JOB_ID, GCP_RESULTS_BUCKET, "completed" if success else "failed", error_msg)
+        status_kwargs = {}
+        if aristotle_id:
+            status_kwargs["aristotle_id"] = aristotle_id
+        
+        update_job_status(GCP_JOB_ID, GCP_RESULTS_BUCKET, "completed" if success else "failed", error_msg, **status_kwargs)
         finalize_gcp_job(GCP_JOB_ID, success, GCP_RESULTS_BUCKET, callback_url)
 
 if __name__ == "__main__":

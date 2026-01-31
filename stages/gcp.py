@@ -15,7 +15,7 @@ def fetch_job_params(job_id: str, bucket: str) -> dict:
         raise ValueError(f"Job {job_id} missing prompt")
     return params
 
-def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str] = None) -> dict:
+def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str] = None, **kwargs) -> dict:
     """Update job status in GCS."""
     from google.cloud import storage
     blob = storage.Client().bucket(bucket).blob(f"jobs/{job_id}.json")
@@ -27,6 +27,7 @@ def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str
     elif status in ("completed", "failed"):
         params["finished_at"] = datetime.now().isoformat()
         if error: params["error"] = error
+    params.update(kwargs)
     blob.upload_from_string(json.dumps(params, indent=2))
     return params
 

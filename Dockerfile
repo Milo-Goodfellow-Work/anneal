@@ -32,4 +32,5 @@ COPY . .
 RUN mkdir -p /app/generated
 
 # Default: sleep forever (for dev attach) or run main.py (prod overrides CMD)
-CMD ["tail", "-f", "/dev/null"]
+# Default to running the application (for Cloud Run Jobs)
+CMD ["python", "main.py"]

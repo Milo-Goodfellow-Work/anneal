@@ -1,0 +1,98 @@
+import os
+import json
+import uuid
+import logging
+from flask import Flask, request, jsonify
+from google.cloud import run_v2
+from google.cloud import storage
+
+app = Flask(__name__)
+
+# Configuration
+PROJECT_ID = os.environ.get("PROJECT_ID")
+REGION = os.environ.get("REGION", "us-central1")
+JOB_NAME = os.environ.get("JOB_NAME", "anneal-job")
+BUCKET_NAME = os.environ.get("BUCKET_NAME")
+
+# Clients
+storage_client = storage.Client()
+run_client = run_v2.JobsClient()
+
+@app.route("/submit", methods=["POST"])
+def submit_job():
+    """
+    Submit a new job.
+    Payload: {"prompt": "str"}
+    Returns: {"job_id": "str"}
+    """
+    data = request.get_json()
+    if not data or "prompt" not in data:
+        return jsonify({"error": "Missing 'prompt' in payload"}), 400
+
+    job_id = str(uuid.uuid4())
+    prompt = data["prompt"]
+    
+    # 1. Write Initial State to GCS
+    if not BUCKET_NAME:
+        return jsonify({"error": "BUCKET_NAME env var not set"}), 500
+        
+    initial_state = {
+        "job_id": job_id,
+        "prompt": prompt,
+        "status": "queued",
+        "created_at": "now", # Placeholder, ideally use isoformat
+        "aristotle_id": None
+    }
+    
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob(f"jobs/{job_id}.json")
+    blob.upload_from_string(json.dumps(initial_state), content_type="application/json")
+    
+    # 2. Trigger Cloud Run Job
+    if not PROJECT_ID:
+         return jsonify({"error": "PROJECT_ID env var not set"}), 500
+
+    job_path = f"projects/{PROJECT_ID}/locations/{REGION}/jobs/{JOB_NAME}"
+    
+    overrides = {
+        "container_overrides": [
+            {
+                "env": [
+                    {"name": "JOB_ID", "value": job_id},
+                    {"name": "RESULTS_BUCKET", "value": BUCKET_NAME}
+                ]
+            }
+        ]
+    }
+
+    try:
+        operation = run_client.run_job(name=job_path, overrides=overrides)
+        # We don't wait for completion, just trigger
+    except Exception as e:
+        app.logger.error(f"Failed to trigger job: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+@app.route("/status/<job_id>", methods=["GET"])
+def get_status(job_id):
+    """
+    Get job status from GCS.
+    """
+    if not BUCKET_NAME:
+        return jsonify({"error": "BUCKET_NAME env var not set"}), 500
+
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob(f"jobs/{job_id}.json")
+    
+    if not blob.exists():
+        return jsonify({"error": "Job not found"}), 404
+        
+    try:
+        content = blob.download_as_text()
+        return jsonify(json.loads(content))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

@@ -38,7 +38,7 @@ def run_stage_proving(ctx: dict) -> None:
     try:
         cwd = os.getcwd()
         os.chdir(SPEC_DIR)
-        asyncio.run(_submit_to_aristotle(impl_files))
+        submission_result = asyncio.run(_submit_to_aristotle(impl_files))
         os.chdir(cwd)
     except Exception as e:
         log(f"Aristotle error: {e}")
@@ -51,6 +51,7 @@ def run_stage_proving(ctx: dict) -> None:
         pass
 
     log("=== Stage 2 Complete ===")
+    return submission_result if 'submission_result' in locals() else None
 
 async def _submit_to_aristotle(impl_files: list) -> None:
     verif_path = SPEC_SRC_DIR / "Verif.lean"
@@ -82,6 +83,7 @@ end Src
     )
     if result:
         log(f"Aristotle job submitted: {result}")
+    return result
 
 def _create_placeholder_verif() -> None:
     path = SPEC_SRC_DIR / "Verif.lean"
