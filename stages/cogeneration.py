@@ -13,6 +13,9 @@ def run_stage_cogeneration(ctx: dict) -> None:
     log("=== Stage 1: Co-Generation ===")
     
     prompt = ctx["prompt"]
+    # 1. SETUP: Prepare system instructions
+    # We load the "Persona" (e.g. "You are an expert C programmer...")
+    # and the specific goal for this run.
     instructions = base_instructions_prompt_cogen(prompt)
     payload = (
         f"TASK: Generate a C implementation AND equivalent Lean code\n\n"
@@ -21,6 +24,8 @@ def run_stage_cogeneration(ctx: dict) -> None:
         f"Include test harnesses. Run differential tests until they pass, then call submit_stage.\n"
     )
     
+    # 2. RUN SESSION: Start the agent loop
+    # We pass the instruction + initial user payload to the session manager.
     ok = _session(ctx, instructions, payload)
     if not ok:
         raise RuntimeError("Co-generation did not complete")
@@ -40,6 +45,11 @@ def _session(ctx: dict, instructions: str, user_payload: str) -> bool:
     history: List[types.Content] = [types.Content(role="user", parts=[types.Part.from_text(text=user_payload)])]
     
     for turn in range(MAX_TURNS):
+        # ---------------------------------------------------------------------
+        # 3. GENERATE: Call the LLM
+        # ---------------------------------------------------------------------
+        # We send the entire conversation history (user inputs + tool outputs)
+        # to the model and ask for the next move.
         resp = responses_create(ctx, instructions=instructions, input_data=history)
         model_content = resp.candidates[0].content if hasattr(resp, 'candidates') and resp.candidates else None
         tool_calls = list(resp.function_calls) if hasattr(resp, 'function_calls') and resp.function_calls else []
@@ -60,6 +70,11 @@ def _session(ctx: dict, instructions: str, user_payload: str) -> bool:
         submit_ok = False
         
         for call in tool_calls:
+            # -----------------------------------------------------------------
+            # 4. EXECUTE TOOL: Run the requested action
+            # -----------------------------------------------------------------
+            # The model asked to run a tool (e.g. write_file, run_differential_test).
+            # We execute it locally and get the result (stdout/stderr).
             log(f"  Call: {call.name}({{{', '.join(f'{k}: <{len(str(v))} chars>' if len(str(v)) > 50 else f'{k}: {v!r}' for k,v in (call.args or {}).items())}}})")
             out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
             result_preview = out_item.get("output", "")[:200]
@@ -69,6 +84,11 @@ def _session(ctx: dict, instructions: str, user_payload: str) -> bool:
             if call.name == "submit_stage" and ok:
                 submit_ok = True
         
+        # ---------------------------------------------------------------------
+        # 5. FEEDBACK: Append tool outputs to history
+        # ---------------------------------------------------------------------
+        # We treat the tool output as a message from role="tool".
+        # The model sees this in the next turn and decides if it fixed the issue.
         history.append(types.Content(role="tool", parts=parts))
         
         if submit_ok:

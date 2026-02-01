@@ -29,6 +29,11 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
     if not lean_path.exists():
         return json.dumps({"status": "error", "message": f"Lean harness not found: {lean_harness}"})
 
+    # -------------------------------------------------------------------------
+    # 1. PREPARATION: Compile both the C implementation and the Lean model
+    # -------------------------------------------------------------------------
+    # We treat both as "black boxes" that must behave identically.
+    
     # Compile C
     exe = SPEC_TESTS_DIR / "harness.exe"
     build_dir = SPEC_TESTS_DIR / "build"
@@ -64,6 +69,7 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
         return json.dumps({"status": "error", "where": "c_link", "message": _trunc(r.stderr)})
 
     # Build Lean
+    # This prepares the specific test harness target in the Lake project.
     log("  [DiffTest] lake build...")
     b = run_lake_build(SPEC_DIR)
     if not b.startswith("Build Success"):
@@ -80,7 +86,13 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
     for case_idx in range(DIFF_TOTAL_CASES):
         seed = DIFF_SEED_START + case_idx
         
+        # ---------------------------------------------------------------------
+        # 2. THE LOOP: Fuzzing
+        # ---------------------------------------------------------------------
+        # For each test case, we generate specific random inputs.
+        
         # Generate one case
+        # Calls python gen_inputs.py --seed <N> to get a deterministic random input (e.g. "ALLOC 10; FREE;")
         try:
             gen = subprocess.run([sys.executable, gen_script, "--seed", str(seed)],
                                 capture_output=True, text=True, timeout=GEN_TIMEOUT_S)
@@ -91,7 +103,12 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
         
         case_input = gen.stdout
         
+        # ---------------------------------------------------------------------
+        # 3. EXECUTION: Run both "boxes"
+        # ---------------------------------------------------------------------
+        
         # Run C harness
+        # We feed the generated input into the compiled C executable and capture stdout.
         try:
             c_run = subprocess.run([str(exe)], input=case_input, capture_output=True, text=True, timeout=C_RUN_TIMEOUT_S)
         except subprocess.TimeoutExpired:
@@ -100,6 +117,7 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
             return json.dumps({"status": "error", "where": "c_run", "case": case_idx, "message": _trunc(c_run.stderr)})
         
         # Run Lean harness
+        # We feed the SAME generated input into the Lean model and capture stdout.
         try:
             lean_run = subprocess.run(["lake", "env", "lean", "--run", str(lean_path)],
                                      cwd=str(SPEC_DIR), input=case_input,
@@ -111,6 +129,10 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
         
         c_out = c_run.stdout.strip()
         lean_out = lean_run.stdout.strip()
+        
+        # ---------------------------------------------------------------------
+        # 4. VERIFICATION: Compare the witnesses
+        # ---------------------------------------------------------------------
         
         if c_out != lean_out:
             return json.dumps({"status": "diff", "case": case_idx, 

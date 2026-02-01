@@ -56,6 +56,9 @@ def run_stage_proving(ctx: dict) -> None:
 async def _submit_to_aristotle(impl_files: list) -> None:
     verif_path = SPEC_SRC_DIR / "Verif.lean"
     
+    # 1. Prepare Verification stub
+    # We write a basic Lean file that imports the implementation.
+    # This ensures the project builds before we ask Aristotle to prove things about it.
     stub = """import Src.Prelude
 import Src.Main
 
@@ -68,17 +71,25 @@ end Src
     if not run_lake_build(SPEC_DIR).startswith("Build Success"):
         return
 
+    # 2. Construct the Prompt to Aristotle
+    # We read the user's implementation (Main.lean) and wrap it in a markdown block.
+    # The prompt explicitly asks to "Generate theorems for Src.Main".
+    # This tells Aristotle: "Look at this code, and prove it matches the spec."
     main_content = impl_files[0].read_text() if impl_files else ""
     desc_path = SPEC_DIR / "aristotle_request.txt"
     desc_path.write_text(f"Generate theorems for Src.Main.\n\n```lean\n{main_content}\n```")
     
     verif_rel = str(verif_path.relative_to(SPEC_DIR))
+    # 3. Call Aristotle API
+    # We send two key inputs:
+    #   - input_file_path: The request text (prompt + code)
+    #   - formal_input_context: The context file (Verif.lean) to verify against
     result = await aristotlelib.Project.prove_from_file(
         input_file_path=str(desc_path.relative_to(SPEC_DIR)),
         project_input_type=ProjectInputType.INFORMAL,
         formal_input_context=verif_rel,
         auto_add_imports=True,
-        validate_lean_project=True,
+        validate_lean_project=True, # Validates that the generated proofs actually compile
         wait_for_completion=False,
     )
     if result:

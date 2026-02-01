@@ -27,12 +27,20 @@ def tool_output_item(call_id: str, out: str, name: str = "unknown") -> Dict[str,
     return {"call_id": call_id, "output": out, "name": name, "type": "function_call_output"}
 
 def responses_create(ctx: dict, *, instructions: str, input_data: Any, **_):
+    """
+    Wrapper for Gemini API call.
+    - instructions: The system prompt (Persona).
+    - input_data: The chat history.
+    - tools: The function definitions (schema).
+    """
     contents = input_data if isinstance(input_data, list) else [types.Content(role="user", parts=[types.Part.from_text(text=str(input_data))])]
     config = types.GenerateContentConfig(
         system_instruction=instructions,
         tools=[get_gemini_tools()],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
+    # Note: Retries are handled by the 'tenacity' library upstream if configured,
+    # or by the built-in client depending on version.
     return ctx["client"].models.generate_content(model=MODEL_ID, contents=contents, config=config)
 
 def update_test_state_from_report(ctx: dict, report_json: str) -> None:
@@ -54,11 +62,16 @@ def can_submit_current_stage(ctx: dict) -> Tuple[bool, str]:
     return True, ""
 
 def _safe_relpath(p: str) -> str:
+    """Security check: Prevent path traversal (e.g. ../../etc/passwd)."""
     p = (p or "").replace("\\", "/").lstrip("/")
     if ".." in p: raise ValueError("Path traversal not allowed")
     return p
 
 def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict[str, Any], bool]:
+    """
+    Dispatch function: Maps tool name (str) -> Python logic.
+    Returns: (output_dict, success_bool)
+    """
     fname = item.name
     call_id = f"call_{fname}_{id(item)}"
     args = item.args if hasattr(item, 'args') and isinstance(item.args, dict) else {}
@@ -99,6 +112,7 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
             return tool_output_item(call_id, f"Written to {p}"), True
 
         if fname == "write_text_file":
+            # Used for C files (and other temp files).
             rel = _safe_relpath(args["path"])
             if not is_writable(rel):
                 return tool_output_item(call_id, f"Denied: {rel} not writable"), False
@@ -133,6 +147,7 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
             return tool_output_item(call_id, out), True
 
         if fname == "run_differential_test":
+            # The heart of verification. See diff_test.py.
             out_json = run_differential_test_impl(ctx, args)
             update_test_state_from_report(ctx, out_json)
             return tool_output_item(call_id, out_json), True
