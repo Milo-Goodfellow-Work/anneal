@@ -84,6 +84,8 @@ def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
     all_cases = []
     
     for case_idx in range(DIFF_TOTAL_CASES):
+        # Deterministic seeding: We use a sequential seed (1, 2, 3...) so that 
+        # any failures are easily reproducible by re-running the generator with the same seed.
         seed = DIFF_SEED_START + case_idx
         
         # ---------------------------------------------------------------------

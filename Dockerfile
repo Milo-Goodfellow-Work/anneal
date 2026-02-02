@@ -21,16 +21,18 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy spec and pre-build Mathlib cache (EXPENSIVE - done once per image build)
+# 24: Copy spec and pre-build Mathlib cache
 COPY spec/ ./spec/
 RUN cd /app/spec && lake exe cache get && lake build
 
-# Copy all source code (includes .git for commits)
-COPY . .
+# 28: Copy application source code
+# We copy files/dirs selectively to avoid overwriting the built ./spec folder
+COPY main.py helpers.py requirements.txt ./
+COPY stages/ ./stages/
+COPY trigger_api/ ./trigger_api/
 
 # Create working directory for generated code
 RUN mkdir -p /app/generated
 
-# Default: sleep forever (for dev attach) or run main.py (prod overrides CMD)
 # Default to running the application (for Cloud Run Jobs)
 CMD ["python", "main.py"]

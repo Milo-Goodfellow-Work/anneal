@@ -109,6 +109,8 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
             log(f"  ✓ Wrote {rel} ({len(content)} chars)")
+            # Invalidate verification state because code changed
+            ctx["equiv_state"]["last_status"] = "modified"
             return tool_output_item(call_id, f"Written to {p}"), True
 
         if fname == "write_text_file":
@@ -122,6 +124,8 @@ def execute_tool_call(ctx: dict, item, run_differential_test_impl) -> Tuple[Dict
             p = Path(rel)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content)
+            # Invalidate verification state because code changed
+            ctx["equiv_state"]["last_status"] = "modified"
             return tool_output_item(call_id, f"Written to {p}"), True
 
         if fname == "verify_build":

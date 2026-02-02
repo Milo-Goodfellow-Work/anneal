@@ -17,6 +17,15 @@ WRITABLE FILES:
 
 LOCKED: spec/Src/Prelude.lean (do not modify)
 
+IMPORTS:
+- Prelude.lean provides: Std, HashMap, HashSet, TreeMap, TreeSet, U8/U16/U32/U64
+- If you need Mathlib functionality, add specific imports to Main.lean:
+  - `import Mathlib.Data.Nat.Basic` for Nat lemmas
+  - `import Mathlib.Data.List.Lemmas` for List lemmas  
+  - `import Mathlib.Tactic` for tactics (omega, linarith, simp, etc.)
+  - `import Mathlib.Data.Fin.Basic` for Fin type
+- Do NOT use `import Mathlib` (imports everything, too slow)
+
 SPECIFICATION:
 {prompt}
 
