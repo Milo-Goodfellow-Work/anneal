@@ -1,7 +1,7 @@
 """Stage 2: Proving - Submit Lean definitions to Aristotle for spec generation + proofs."""
 from __future__ import annotations
 import os, asyncio
-from helpers import log, run_lake_build, SPEC_DIR, SPEC_SRC_DIR
+from helpers import log, run_lake_build, SPEC_DIR, SPEC_SRC_DIR, MODEL_ID
 
 try:
     import aristotlelib
@@ -9,6 +9,34 @@ try:
 except ImportError:
     aristotlelib = None
     ProjectInputType = None
+
+def _generate_project_description(ctx: dict, main_content: str) -> str:
+    """Ask Gemini to describe the project for Aristotle."""
+    prompt = ctx.get("prompt", "")
+    user_msg = f"""Write a project description that will be sent to Aristotle, an automated theorem prover for Lean 4.
+
+Original specification:
+{prompt}
+
+Implementation:
+```lean
+{main_content}
+```
+
+Describe (2-3 paragraphs):
+1. What the program does (high-level purpose)
+2. Key functions/definitions and their expected behavior
+3. Important properties that should hold (invariants, totality, correctness conditions)
+
+Be specific about function names. Write *to* Aristotle, not *about* Aristotle."""
+
+    try:
+        resp = ctx["client"].models.generate_content(model=MODEL_ID, contents=user_msg)
+        if resp.candidates and resp.candidates[0].content.parts:
+            return resp.candidates[0].content.parts[0].text
+    except Exception as e:
+        log(f"Failed to generate description: {e}")
+    return f"Verify the correctness of this Lean 4 implementation based on: {prompt}"
 
 def run_stage_proving(ctx: dict) -> None:
     log("=== Stage 2: Proving via Aristotle ===")
@@ -38,7 +66,7 @@ def run_stage_proving(ctx: dict) -> None:
     try:
         cwd = os.getcwd()
         os.chdir(SPEC_DIR)
-        submission_result = asyncio.run(_submit_to_aristotle(impl_files))
+        submission_result = asyncio.run(_submit_to_aristotle(ctx, impl_files))
         os.chdir(cwd)
     except Exception as e:
         log(f"Aristotle error: {e}")
@@ -53,31 +81,63 @@ def run_stage_proving(ctx: dict) -> None:
     log("=== Stage 2 Complete ===")
     return submission_result if 'submission_result' in locals() else None
 
-async def _submit_to_aristotle(impl_files: list) -> None:
+async def _submit_to_aristotle(ctx: dict, impl_files: list) -> None:
     verif_path = SPEC_SRC_DIR / "Verif.lean"
     
-    # 1. Prepare Verification stub
-    # We write a basic Lean file that imports the implementation.
-    # This ensures the project builds before we ask Aristotle to prove things about it.
-    stub = """import Src.Prelude
-import Src.Main
-
-namespace Src
-#check @Nat.add
-end Src
-"""
-    verif_path.write_text(stub)
+    # 1. Read Verif.lean and add imports for any extra implementation files
+    verif_content = verif_path.read_text()
+    
+    # Add imports for any Module*.lean files not already imported
+    extra_imports = []
+    for f in impl_files:
+        module_name = f.stem
+        import_line = f"import Src.{module_name}"
+        if import_line not in verif_content:
+            extra_imports.append(import_line)
+    
+    if extra_imports:
+        # Insert extra imports after the existing import lines
+        lines = verif_content.split("\n")
+        insert_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith("import "):
+                insert_idx = i + 1
+        for imp in reversed(extra_imports):
+            lines.insert(insert_idx, imp)
+        verif_content = "\n".join(lines)
+        verif_path.write_text(verif_content)
     
     if not run_lake_build(SPEC_DIR).startswith("Build Success"):
         return
 
     # 2. Construct the Prompt to Aristotle
-    # We read the user's implementation (Main.lean) and wrap it in a markdown block.
-    # The prompt explicitly asks to "Generate theorems for Src.Main".
-    # This tells Aristotle: "Look at this code, and prove it matches the spec."
-    main_content = impl_files[0].read_text() if impl_files else ""
+    # Generate a detailed description using Gemini, then ask Aristotle to prove theorems.
+    all_content = "\n\n".join(f"-- {f.name}\n{f.read_text()}" for f in impl_files)
+    description = _generate_project_description(ctx, all_content)
+    
     desc_path = SPEC_DIR / "aristotle_request.txt"
-    desc_path.write_text(f"Generate theorems for Src.Main.\n\n```lean\n{main_content}\n```")
+    aristotle_prompt = f"""{description}
+
+---
+
+Write a complete Verif.lean file that verifies the correctness of this implementation.
+Your output must be a valid Lean 4 file based on:
+
+```lean
+{verif_content}```
+
+Replace the empty namespace body with actual theorems and proofs.
+Focus on:
+- Functional correctness of the main operations
+- Totality (functions terminate on all valid inputs)  
+- Key invariants and properties
+
+The implementation code is:
+
+```lean
+{all_content}
+```"""
+    desc_path.write_text(aristotle_prompt)
     
     verif_rel = str(verif_path.relative_to(SPEC_DIR))
     # 3. Call Aristotle API
