@@ -85,8 +85,13 @@ def list_lean_files(base_dir: Path) -> List[str]:
 def run_lake_build(cwd: Path) -> str:
     start = time.time()
     try:
-        res = subprocess.run(["lake", "build"], cwd=str(cwd), capture_output=True, text=True, check=False)
+        # DEBUG: Use -v to see what is slowing it down
+        res = subprocess.run(["lake", "build", "-v"], cwd=str(cwd), capture_output=True, text=True, check=False)
         t = time.time() - start
+        
+        # Log output regardless of success to debug slowness
+        log(f"DEBUG LAKE BUILD ({t:.1f}s):\nSTDOUT HEAD:\n{res.stdout[:2000]}\nSTDERR:\n{res.stderr}")
+        
         if res.returncode == 0:
             return f"Build Success ({t:.2f}s)"
         return f"Build Failed (exit={res.returncode}, {t:.2f}s):\n{res.stderr}\n{res.stdout}"
