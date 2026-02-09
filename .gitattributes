@@ -1,2 +1,4 @@
 # Never allow Windows CRLF to break Linux shebang scripts
 *.sh text eol=lf
+*.py text eol=lf
+.gitignore text eol=lf

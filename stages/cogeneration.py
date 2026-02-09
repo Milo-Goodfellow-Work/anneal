@@ -1,215 +1,97 @@
-"""
-Anneal Stages - Co-Generation stage implementation.
-
-Stage 1 of the 2-stage pipeline:
-- Prompt Mode: Generates implementation + Lean from natural language
-- Legacy Mode: Translates existing C to Lean
-
-The output is verified-equivalent impl + Lean code (definitions only, no specs).
-"""
+"""Stage 1: Co-Generation - Generate C implementation + Lean from prompt."""
 from __future__ import annotations
-import json
-from typing import Optional, Any, List, Dict
-from pathlib import Path
-
-from helpers import (
-    log, trunc, _read_text_file, _limit_lines, run_lake_build,
-    MAX_SESSION_TURNS, DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN,
-)
+from typing import List
+from helpers import log, run_lake_build, SPEC_DIR
 from stages.llm import responses_create, execute_tool_call
-from stages.prompts import base_instructions_cogen, base_instructions_prompt_cogen
+from stages.prompts import base_instructions_prompt_cogen
 from stages.diff_test import run_differential_test_impl
 
-
-def _session_cogeneration(
-    ctx: dict,
-    *,
-    instructions: str,
-    user_payload: str,
-    max_turns: int = MAX_SESSION_TURNS * 4,
-) -> bool:
-    """
-    Run the co-generation session until:
-    1. Code is generated in both languages
-    2. Differential tests pass robustly (5 runs x 5 cases)
-    """
-    from google.genai import types
-    
-    # Build initial conversation history
-    conversation_history: List[types.Content] = [
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=user_payload)]
-        )
-    ]
-
-    for turn in range(max_turns):
-        log(f"[CoGen] Turn {turn+1}/{max_turns}")
-        resp = responses_create(
-            ctx,
-            instructions=instructions,
-            input_data=conversation_history,
-        )
-        
-        # Extract the model's response content (includes any function calls)
-        model_content = None
-        if hasattr(resp, 'candidates') and resp.candidates:
-            model_content = resp.candidates[0].content
-        
-        # Log any text output
-        if hasattr(resp, 'text') and resp.text:
-            log(f"Model: {trunc(resp.text, 800)}")
-        
-        # Get function calls
-        tool_calls = []
-        if hasattr(resp, 'function_calls') and resp.function_calls:
-            for fc in resp.function_calls:
-                tool_calls.append(fc)
-
-        if not tool_calls:
-            # No tool calls - add model response and prompt for tools
-            if model_content:
-                conversation_history.append(model_content)
-            conversation_history.append(types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=(
-                    "NO TOOL CALLS DETECTED.\n"
-                    "You MUST call tools to make progress.\n"
-                    "Next steps:\n"
-                    "1. Write implementation code\n"
-                    "2. Write Lean definitions\n"
-                    "3. Update test harnesses\n"
-                    "4. Run differential tests\n"
-                    "5. Call submit_stage when tests pass robustly\n"
-                ))]
-            ))
-            continue
-
-        # Add model's response (with function calls) to history
-        if model_content:
-            conversation_history.append(model_content)
-        
-        # Execute tools and build function response parts
-        function_response_parts: List[types.Part] = []
-        submit_ok = False
-
-        for call in tool_calls:
-            out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
-            # Create function response part
-            function_response_parts.append(
-                types.Part.from_function_response(
-                    name=call.name,
-                    response={"result": out_item.get("output", "")},
-                )
-            )
-            if call.name == "submit_stage" and ok:
-                submit_ok = True
-
-        # Add all function responses as a single "tool" turn (required by Gemini)
-        conversation_history.append(types.Content(
-            role="tool",
-            parts=function_response_parts
-        ))
-
-        if submit_ok:
-            return True
-
-    log("[CoGen] Session exceeded max turns without successful completion.")
-    return False
-
-
-def _build_prompt_payload(ctx: dict) -> str:
-    """Build the user payload for prompt-driven generation."""
-    prompt = ctx.get("prompt", "No prompt provided")
-    language = ctx.get("language", "c").upper()
-    
-    return (
-        f"TASK: Generate a {language} implementation AND equivalent Lean code\n\n"
-        f"SPECIFICATION:\n{prompt}\n\n"
-        "You must:\n"
-        f"1. Write {language} code in {ctx['source_root']}/\n"
-        f"2. Write equivalent Lean definitions in spec/Spec/{ctx['name']}/Main.lean\n"
-        "3. Write test harnesses (gen_inputs.py, harness.c, Harness.lean)\n"
-        "4. Run differential tests until they pass\n"
-        "5. Call submit_stage when complete\n\n"
-        "REMEMBER: Think in Lean first! Design your data structures and functions\n"
-        "so they translate naturally to Lean 4.\n\n"
-        "BEGIN: Start by designing the core data structures."
-    )
-
-
-def _build_legacy_payload(ctx: dict) -> str:
-    """Build the user payload for legacy translation mode."""
-    src_files = sorted(ctx["src_to_lean"].keys())
-    lean_files = sorted([p for p in ctx["allowed_lean_writes"] 
-                        if p.startswith(f"{ctx['name']}/") and not p.endswith("Verif.lean")])
-    
-    # Read existing source files for context
-    src_blobs = []
-    for rel in src_files[:10]:
-        p = ctx["source_root"] / rel
-        if p.exists():
-            content = _read_text_file(p)
-            src_blobs.append(f"FILE: {rel}\n{trunc(content, 4000)}\n")
-
-    return (
-        "TASK: TRANSLATE existing C code to Lean\n\n"
-        "You are translating a safety-critical system. Your job is to:\n"
-        "1. Read and understand each source file\n"
-        "2. Write a functionally equivalent Lean translation\n"
-        "3. Write test harnesses to verify equivalence\n"
-        "4. Run differential tests and fix any mismatches\n\n"
-        f"SOURCE FILES TO TRANSLATE ({len(src_files)}):\n"
-        + "\n".join(_limit_lines(src_files, 30)) + "\n\n"
-        f"TARGET LEAN FILES ({len(lean_files)}):\n"
-        + "\n".join(_limit_lines(lean_files, 30)) + "\n\n"
-        "SOURCE FILE CONTENTS:\n"
-        + "\n\n".join(src_blobs) + "\n\n"
-        "BEGIN: Start by reading the first source file and translating it."
-    )
-
+MAX_TURNS = 64
 
 def run_stage_cogeneration(ctx: dict) -> None:
-    """
-    Run the Co-Generation stage.
-    
-    Two modes:
-    - Prompt Mode: Generate implementation + Lean from natural language prompt
-    - Legacy Mode: Translate existing C to Lean
-    
-    Success criteria:
-    - Code exists in both languages
-    - Differential tests pass with 5 runs x 5 cases
-    - Lake build succeeds
-    """
+    """Run co-generation: generate implementation + Lean from prompt."""
     log("=== Stage 1: Co-Generation ===")
-    ctx["current_stage"] = "COGENERATION"
     
-    is_prompt_mode = ctx.get("prompt") is not None
-
-    if is_prompt_mode:
-        log(f"Mode: Prompt-driven generation ({ctx.get('language', 'c')})")
-        instructions = base_instructions_prompt_cogen(ctx)
-        user_payload = _build_prompt_payload(ctx)
-    else:
-        log("Mode: Legacy translation")
-        instructions = base_instructions_cogen(ctx)
-        user_payload = _build_legacy_payload(ctx)
-
-    ok = _session_cogeneration(ctx, instructions=instructions, user_payload=user_payload)
+    prompt = ctx["prompt"]
+    # 1. SETUP: Prepare system instructions
+    # We load the "Persona" (e.g. "You are an expert C programmer...")
+    # and the specific goal for this run.
+    instructions = base_instructions_prompt_cogen(prompt)
+    payload = (
+        f"TASK: Generate a C implementation AND equivalent Lean code\n\n"
+        f"SPECIFICATION:\n{prompt}\n\n"
+        f"Write C code in generated/, Lean in spec/Src/Main.lean.\n"
+        f"Include test harnesses. Run differential tests until they pass, then call submit_stage.\n"
+    )
+    
+    # 2. RUN SESSION: Start the agent loop
+    # We pass the instruction + initial user payload to the session manager.
+    ok = _session(ctx, instructions, payload)
     if not ok:
-        raise RuntimeError("Co-generation stage did not complete successfully.")
-
-    # Verify final state
-    out = run_lake_build(ctx["spec_pkg_root"])
+        raise RuntimeError("Co-generation did not complete")
+    
+    out = run_lake_build(SPEC_DIR)
     if not out.startswith("Build Success"):
-        raise RuntimeError(f"Co-generation ended but build fails: {out}")
+        raise RuntimeError(f"Build fails after co-generation: {out}")
+    
+    if ctx["equiv_state"]["last_status"] != "success":
+        raise RuntimeError("Co-generation ended without passing differential tests")
+    
+    log("=== Stage 1 Complete ===")
 
-    # Check equivalence state
-    if ctx["equiv_state"].get("last_status") != "success":
-        raise RuntimeError("Co-generation ended without passing differential tests.")
-    if ctx["equiv_state"].get("passed_runs", 0) < DIFF_REQUIRED_RUNS:
-        raise RuntimeError(f"Insufficient test runs: {ctx['equiv_state'].get('passed_runs', 0)} < {DIFF_REQUIRED_RUNS}")
-
-    log("=== Stage 1 Complete: Co-Generation successful ===")
-
+def _session(ctx: dict, instructions: str, user_payload: str) -> bool:
+    from google.genai import types
+    
+    history: List[types.Content] = [types.Content(role="user", parts=[types.Part.from_text(text=user_payload)])]
+    
+    for turn in range(MAX_TURNS):
+        # ---------------------------------------------------------------------
+        # 3. GENERATE: Call the LLM
+        # ---------------------------------------------------------------------
+        # We send the entire conversation history (user inputs + tool outputs)
+        # to the model and ask for the next move.
+        resp = responses_create(ctx, instructions=instructions, input_data=history)
+        model_content = resp.candidates[0].content if hasattr(resp, 'candidates') and resp.candidates else None
+        tool_calls = list(resp.function_calls) if hasattr(resp, 'function_calls') and resp.function_calls else []
+        
+        log(f"[Turn {turn+1}] {len(tool_calls)} calls: {[c.name for c in tool_calls]}")
+        
+        if not tool_calls:
+            if model_content:
+                history.append(model_content)
+            history.append(types.Content(role="user", parts=[types.Part.from_text(
+                text="NO TOOL CALLS. You MUST call tools to make progress.")]))
+            continue
+        
+        if model_content:
+            history.append(model_content)
+        
+        parts: List[types.Part] = []
+        submit_ok = False
+        
+        for call in tool_calls:
+            # -----------------------------------------------------------------
+            # 4. EXECUTE TOOL: Run the requested action
+            # -----------------------------------------------------------------
+            # The model asked to run a tool (e.g. write_file, run_differential_test).
+            # We execute it locally and get the result (stdout/stderr).
+            log(f"  Call: {call.name}({{{', '.join(f'{k}: <{len(str(v))} chars>' if len(str(v)) > 50 else f'{k}: {v!r}' for k,v in (call.args or {}).items())}}})")
+            out_item, ok = execute_tool_call(ctx, call, run_differential_test_impl)
+            result_preview = out_item.get("output", "")[:200]
+            if call.name == "run_differential_test":
+                log(f"  [DiffTest] {result_preview}")
+            parts.append(types.Part.from_function_response(name=call.name, response={"result": out_item.get("output", "")}))
+            if call.name == "submit_stage" and ok:
+                submit_ok = True
+        
+        # ---------------------------------------------------------------------
+        # 5. FEEDBACK: Append tool outputs to history
+        # ---------------------------------------------------------------------
+        # We treat the tool output as a message from role="tool".
+        # The model sees this in the next turn and decides if it fixed the issue.
+        history.append(types.Content(role="tool", parts=parts))
+        
+        if submit_ok:
+            return True
+    
+    return False

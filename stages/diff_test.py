@@ -1,329 +1,153 @@
-"""
-Anneal Stages - Differential testing implementation.
-
-This module contains the procedural differential test runner.
-"""
+"""Differential testing - compare C and Lean harness outputs."""
 from __future__ import annotations
-import sys
-import json
-import time
-import signal
-import shlex
-import subprocess
+import sys, json, time, subprocess, shutil
 from pathlib import Path
 from typing import Dict, Any, List
+from helpers import (log, run_lake_build, run_lake_build_target, list_project_files, 
+                     SPEC_DIR, SPEC_SRC_DIR, SPEC_TESTS_DIR,
+                     DIFF_TOTAL_CASES, DIFF_SEED_START,
+                     GEN_TIMEOUT_S, C_RUN_TIMEOUT_S, LEAN_RUN_TIMEOUT_S)
 
-from helpers import (
-    log, trunc, trunc_tail, _safe_relpath, run_lake_build, run_lake_build_target,
-    list_project_files, SPEC_DIR, SPEC_TESTS_DIR,
-    DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN, DIFF_SEED_START,
-    GEN_TIMEOUT_S, C_RUN_TIMEOUT_S, LEAN_RUN_TIMEOUT_S,
-)
+GENERATED_DIR = Path("generated")
 
+def _safe_relpath(p: str) -> str:
+    return (p or "").replace("\\", "/").lstrip("/").lstrip("./").replace("spec/Src/", "").replace("Src/", "")
 
-def _normalize_lean_harness_relpath(p: str) -> str:
-    """Normalize a harness path."""
-    p = (p or "").replace("\\", "/").strip()
-    if p.startswith("./"):
-        p = p[2:]
-    if p.startswith("spec/Spec/"):
-        p = p[len("spec/Spec/"):]
-    if p.startswith("Spec/"):
-        p = p[len("Spec/"):]
-    return _safe_relpath(p)
+def _trunc(s: str, n: int = 2000) -> str:
+    return s[:n] + "..." if len(s) > n else s
 
 
 def run_differential_test_impl(ctx: dict, args: Dict[str, Any]) -> str:
-    """
-    Robust differential test runner.
-    Returns JSON string with status + details.
-    """
     gen_script = _safe_relpath(args.get("gen_script_path", "spec/tests/gen_inputs.py"))
     c_harness = _safe_relpath(args.get("c_harness_path", "spec/tests/harness.c"))
-    source_harness = c_harness
-    raw = args.get("lean_harness_path", "tests/Harness.lean")
-    lean_harness = _normalize_lean_harness_relpath(raw)
-
+    lean_harness = _safe_relpath(args.get("lean_harness_path", "tests/Harness.lean"))
     t0 = time.time()
 
-    candidates = []
-    candidates.append(ctx["spec_src_root"] / lean_harness)
-    candidates.append(ctx["spec_src_root"] / "tests/Harness.lean")
+    lean_path = SPEC_SRC_DIR / lean_harness
+    if not lean_path.exists():
+        lean_path = SPEC_SRC_DIR / "tests/Harness.lean"
+    if not lean_path.exists():
+        return json.dumps({"status": "error", "message": f"Lean harness not found: {lean_harness}"})
 
-    lean_run_path = None
-    for cand in candidates:
-        if cand.exists():
-            lean_run_path = cand
-            break
-
-    if lean_run_path is None:
-        tests_dir = ctx["spec_src_root"] / "tests"
-        listing = []
-        if tests_dir.exists():
-            listing = sorted([x.name for x in tests_dir.iterdir() if x.is_file()])[:50]
-
-        return json.dumps({
-            "status": "error",
-            "where": "lean_harness",
-            "message": "Lean harness not found",
-            "raw_arg": raw,
-            "normalized": lean_harness,
-            "tried": [str(c) for c in candidates],
-            "tests_dir_listing": listing,
-        })
-
-    def _rc_desc(rc: int) -> str:
-        if rc < 0:
-            sig = -rc
-            try:
-                return f"signal {signal.Signals(sig).name} ({rc})"
-            except Exception:
-                return f"signal {sig} ({rc})"
-        return str(rc)
-
-    # 1) Compile Source Harness
-    exe_source = SPEC_TESTS_DIR / "harness.exe"
+    # -------------------------------------------------------------------------
+    # 1. PREPARATION: Compile both the C implementation and the Lean model
+    # -------------------------------------------------------------------------
+    # We treat both as "black boxes" that must behave identically.
+    
+    # Compile C
+    exe = SPEC_TESTS_DIR / "harness.exe"
     build_dir = SPEC_TESTS_DIR / "build"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    if str(source_harness).endswith(".c"):
-        proj_c_srcs = [
-            (ctx["source_root"] / f)
-            for f in list_project_files(ctx["source_root"])
-            if f.endswith(".c") and "main.c" not in f.replace("\\", "/").lower()
-        ]
+    proj_srcs = [GENERATED_DIR / f for f in list_project_files(GENERATED_DIR) 
+                 if f.endswith(".c") and "main.c" not in f.lower()]
+    inc_dirs = {str(GENERATED_DIR.resolve())}
+    inc_flags = [f for d in inc_dirs for f in ["-I", d]]
+    CFLAGS = ["-std=c11", "-O2"]
 
-        include_dirs = {str(ctx["source_root"].resolve())}
-        for f in list_project_files(ctx["source_root"]):
-            if f.endswith((".h", ".hpp")):
-                include_dirs.add(str((ctx["source_root"] / Path(f).parent).resolve()))
-        include_flags = [flag for d in sorted(include_dirs) for flag in ["-I", d]]
+    # Compile harness
+    harness_o = build_dir / "harness.o"
+    cmd = ["gcc", *CFLAGS, *inc_flags, "-c", str(Path(c_harness)), "-o", str(harness_o)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        return json.dumps({"status": "error", "where": "c_harness_compile", "message": _trunc(r.stderr)})
 
-        COMMON = ["-std=c11", "-O2", "-g", "-fno-omit-frame-pointer"]
+    # Compile project sources
+    obj_files = [str(harness_o)]
+    for src in proj_srcs:
+        o = build_dir / (src.stem + ".o")
+        r = subprocess.run(["gcc", *CFLAGS, *inc_flags, "-c", str(src), "-o", str(o)], capture_output=True, text=True)
+        if r.returncode != 0:
+            return json.dumps({"status": "error", "where": "c_compile", "file": src.name, "message": _trunc(r.stderr)})
+        obj_files.append(str(o))
 
-        HARNESS_C = str(Path(source_harness))
-        harness_o = build_dir / "harness.o"
-        harness_cmd = [
-            "gcc", *COMMON,
-            "-Wall", "-Wextra",
-            "-Werror=implicit-function-declaration",
-            "-Werror=return-type",
-            *include_flags,
-            "-c", HARNESS_C, "-o", str(harness_o),
-        ]
+    # Link
+    r = subprocess.run(["gcc", *obj_files, "-o", str(exe), "-lm"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return json.dumps({"status": "error", "where": "c_link", "message": _trunc(r.stderr)})
 
-        proj_macros: List[str] = []
-        proj_os: List[Path] = []
-        proj_compile_cmds: List[List[str]] = []
-        for src in proj_c_srcs:
-            obj = build_dir / (src.stem + ".o")
-            proj_os.append(obj)
-            proj_compile_cmds.append([
-                "gcc", *COMMON,
-                *proj_macros,
-                *include_flags,
-                "-c", str(src), "-o", str(obj),
-            ])
-
-        link_cmd = ["gcc", "-o", str(exe_source), str(harness_o)] + [str(o) for o in proj_os]
-
-        proc_h = subprocess.run(harness_cmd, capture_output=True, text=True)
-        if proc_h.returncode != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "source_compile",
-                "message": "Harness compile failed",
-                "cmd": " ".join(shlex.quote(x) for x in harness_cmd),
-                "stderr": trunc(proc_h.stderr, 3000),
-                "stdout": trunc(proc_h.stdout, 1500),
-            })
-
-        for cmd in proj_compile_cmds:
-            proc_s = subprocess.run(cmd, capture_output=True, text=True)
-            if proc_s.returncode != 0:
-                return json.dumps({
-                    "status": "error",
-                    "where": "source_compile",
-                    "message": "Project source compile failed",
-                    "cmd": " ".join(shlex.quote(x) for x in cmd),
-                    "stderr": trunc(proc_s.stderr, 3000),
-                    "stdout": trunc(proc_s.stdout, 1500),
-                })
-
-        proc_l = subprocess.run(link_cmd, capture_output=True, text=True)
-        if proc_l.returncode != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "source_link",
-                "message": "Link failed",
-                "cmd": " ".join(shlex.quote(x) for x in link_cmd),
-                "stderr": trunc(proc_l.stderr, 3000),
-                "stdout": trunc(proc_l.stdout, 1500),
-            })
-
-    # 2) Ensure Lean builds
-    log("[DiffTest] Starting lake build...")
-    build_start = time.time()
-    b_out = run_lake_build(ctx["spec_pkg_root"])
-    log(f"[DiffTest] lake build completed in {time.time() - build_start:.1f}s")
-    if not b_out.startswith("Build Success"):
-        return json.dumps({"status": "error", "where": "lean_build", "message": "Lean build failed", "build": trunc(b_out, 4000)})
-
-    log("[DiffTest] Building harness target Spec.tests.Harness...")
-    harness_build_start = time.time()
-    hb = run_lake_build_target(ctx["spec_pkg_root"], target="Spec.tests.Harness")
-    log(f"[DiffTest] Harness build completed in {time.time() - harness_build_start:.1f}s")
+    # Build Lean
+    # This prepares the specific test harness target in the Lake project.
+    log("  [DiffTest] lake build...")
+    b = run_lake_build(SPEC_DIR)
+    if not b.startswith("Build Success"):
+        return json.dumps({"status": "error", "where": "lean_build", "message": _trunc(b)})
+    log("  [DiffTest] building Harness target...")
+    hb = run_lake_build_target(SPEC_DIR, target="Src.tests.Harness")
     if not hb.startswith("Build Success"):
-        return json.dumps({
-            "status": "error",
-            "where": "lean_harness_build",
-            "message": "Lean harness does not typecheck",
-            "build": trunc_tail(hb, 4000),
-        })
+        return json.dumps({"status": "error", "where": "harness_build", "message": _trunc(hb, 3000)})
 
-    # 3) Run multiple seeds
-    runs: List[Dict[str, Any]] = []
-    passed = 0
-
-    for k in range(DIFF_REQUIRED_RUNS):
-        seed = DIFF_SEED_START + k
-
+    # Run tests - one case at a time
+    t0 = time.time()
+    all_cases = []
+    
+    for case_idx in range(DIFF_TOTAL_CASES):
+        # Deterministic seeding: We use a sequential seed (1, 2, 3...) so that 
+        # any failures are easily reproducible by re-running the generator with the same seed.
+        seed = DIFF_SEED_START + case_idx
+        
+        # ---------------------------------------------------------------------
+        # 2. THE LOOP: Fuzzing
+        # ---------------------------------------------------------------------
+        # For each test case, we generate specific random inputs.
+        
+        # Generate one case
+        # Calls python gen_inputs.py --seed <N> to get a deterministic random input (e.g. "ALLOC 10; FREE;")
         try:
-            gen_proc = subprocess.run(
-                [sys.executable, gen_script, "--seed", str(seed), "--n", str(DIFF_MIN_CASES_PER_RUN)],
-                capture_output=True,
-                text=True,
-                timeout=GEN_TIMEOUT_S,
-                check=False,
-            )
+            gen = subprocess.run([sys.executable, gen_script, "--seed", str(seed)],
+                                capture_output=True, text=True, timeout=GEN_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            return json.dumps({"status": "timeout", "where": "generator", "seed": seed, "message": f"gen_inputs.py exceeded {GEN_TIMEOUT_S}s"})
-        except Exception as e:
-            return json.dumps({"status": "error", "where": "generator", "seed": seed, "message": str(e)})
-
-        if gen_proc.returncode != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "generator",
-                "seed": seed,
-                "message": "Generator must accept '--seed' and '--n' and exit 0.",
-                "stderr": trunc(gen_proc.stderr, 2000),
-                "stdout": trunc(gen_proc.stdout, 1200),
-            })
-
-        inputs = gen_proc.stdout
-        lines = [ln for ln in inputs.splitlines() if ln.strip() != ""]
-        num_cases = len(lines)
-
-        if num_cases < DIFF_MIN_CASES_PER_RUN:
-            return json.dumps({
-                "status": "insufficient_tests",
-                "where": "generator",
-                "seed": seed,
-                "message": f"Generator produced only {num_cases} cases; require >= {DIFF_MIN_CASES_PER_RUN}.",
-            })
-
-        # Run C
-        log(f"[DiffTest] Running C harness (seed={seed}, {num_cases} cases)...")
-        c_start = time.time()
+            return json.dumps({"status": "timeout", "where": "generator", "case": case_idx})
+        if gen.returncode != 0:
+            return json.dumps({"status": "error", "where": "generator", "case": case_idx, "message": _trunc(gen.stderr)})
+        
+        case_input = gen.stdout
+        
+        # ---------------------------------------------------------------------
+        # 3. EXECUTION: Run both "boxes"
+        # ---------------------------------------------------------------------
+        
+        # Run C harness
+        # We feed the generated input into the compiled C executable and capture stdout.
         try:
-            c_run = subprocess.run(
-                [str(exe_source)],
-                input=inputs,
-                capture_output=True,
-                text=True,
-                timeout=C_RUN_TIMEOUT_S
-            )
-            c_out = c_run.stdout
-            c_err = c_run.stderr
-            c_rc = c_run.returncode
-            log(f"[DiffTest] C harness done in {time.time() - c_start:.2f}s (rc={c_rc})")
+            c_run = subprocess.run([str(exe)], input=case_input, capture_output=True, text=True, timeout=C_RUN_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            return json.dumps({
-                "status": "timeout",
-                "where": "c_run",
-                "seed": seed,
-                "message": f"C harness exceeded {C_RUN_TIMEOUT_S}s",
-                "inputs_tail": "\n".join(lines[-20:]),
-            })
-        except Exception as e:
-            return json.dumps({
-                "status": "error",
-                "where": "c_run",
-                "seed": seed,
-                "message": str(e),
-                "inputs_tail": "\n".join(lines[-20:]),
-            })
-
-        if c_rc != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "c_run",
-                "seed": seed,
-                "message": f"C harness exited {_rc_desc(c_rc)}",
-                "inputs_tail": "\n".join(lines[-40:]),
-                "stderr": trunc(c_err, 3000),
-                "stdout": trunc(c_out, 3000),
-            })
-
-        # Run Lean
-        log(f"[DiffTest] Running Lean harness (seed={seed})...")
-        lean_start = time.time()
+            return json.dumps({"status": "timeout", "where": "c_run", "case": case_idx})
+        if c_run.returncode != 0:
+            return json.dumps({"status": "error", "where": "c_run", "case": case_idx, "message": _trunc(c_run.stderr)})
+        
+        # Run Lean harness
+        # We feed the SAME generated input into the Lean model and capture stdout.
         try:
-            lean_cmd = ["lake", "env", "lean", "--run", str(lean_run_path)]
-            lean_run = subprocess.run(
-                lean_cmd,
-                cwd=str(ctx["spec_pkg_root"]),
-                input=inputs,
-                capture_output=True,
-                text=True,
-                timeout=LEAN_RUN_TIMEOUT_S,
-            )
-            lean_out = lean_run.stdout
-            lean_err = lean_run.stderr
-            lean_rc = lean_run.returncode
-            log(f"[DiffTest] Lean harness done in {time.time() - lean_start:.2f}s (rc={lean_rc})")
+            lean_run = subprocess.run(["lake", "env", "lean", "--run", str(lean_path)],
+                                     cwd=str(SPEC_DIR), input=case_input,
+                                     capture_output=True, text=True, timeout=LEAN_RUN_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            return json.dumps({
-                "status": "timeout",
-                "where": "lean_run",
-                "seed": seed,
-                "message": f"Lean harness exceeded {LEAN_RUN_TIMEOUT_S}s; optimize harness/parsing and avoid slow per-line IO.",
-            })
-        except Exception as e:
-            return json.dumps({"status": "error", "where": "lean_run", "seed": seed, "message": str(e)})
+            return json.dumps({"status": "timeout", "where": "lean_run", "case": case_idx})
+        if lean_run.returncode != 0:
+            return json.dumps({"status": "error", "where": "lean_run", "case": case_idx, "message": _trunc(lean_run.stderr)})
+        
+        c_out = c_run.stdout.strip()
+        lean_out = lean_run.stdout.strip()
+        
+        # ---------------------------------------------------------------------
+        # 4. VERIFICATION: Compare the witnesses
+        # ---------------------------------------------------------------------
+        
+        if c_out != lean_out:
+            return json.dumps({"status": "diff", "case": case_idx, 
+                               "input": _trunc(case_input), "c_out": c_out, "lean_out": lean_out})
+        
+        all_cases.append({"seed": seed, "input": case_input.strip(), "c": c_out, "lean": lean_out, "match": True})
 
-        if lean_rc != 0:
-            return json.dumps({
-                "status": "error",
-                "where": "lean_run",
-                "seed": seed,
-                "message": f"Lean harness exited {lean_rc}",
-                "stderr": trunc(lean_err, 2500),
-                "stdout": trunc(lean_out, 2500),
-            })
-
-        if c_out == lean_out:
-            passed += 1
-            runs.append({"seed": seed, "cases": num_cases, "status": "pass"})
-            continue
-
-        return json.dumps({
-            "status": "diff",
-            "where": "compare",
-            "seed": seed,
-            "cases": num_cases,
-            "message": "Outputs differ; fix Lean semantics or harness to match C.",
-            "c_out": trunc(c_out, 2500),
-            "lean_out": trunc(lean_out, 2500),
-        })
-
-    total_s = time.time() - t0
-    return json.dumps({
-        "status": "success",
-        "passed_runs": passed,
-        "required_runs": DIFF_REQUIRED_RUNS,
-        "min_cases_per_run": DIFF_MIN_CASES_PER_RUN,
-        "runs": runs,
-        "total_time_s": round(total_s, 3),
-    })
+    ctx["equiv_state"]["last_status"] = "success"
+    ctx["equiv_state"]["test_data"] = {
+        "cases": all_cases,
+        "total_cases": len(all_cases),
+        "all_pass": True,
+    }
+    
+    return json.dumps({"status": "success", "total_cases": DIFF_TOTAL_CASES,
+                       "total_time_s": round(time.time() - t0, 3)})

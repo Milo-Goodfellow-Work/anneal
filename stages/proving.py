@@ -1,372 +1,187 @@
-"""
-Anneal Stages - Proving stage implementation (Stage 2).
-
-Stage 2 of the new 2-stage pipeline:
-- Takes verified-equivalent Lean definitions from Stage 1
-- Submits to Aristotle with INFORMAL mode for spec generation + proving
-- Outputs proven Lean specifications
-
-This stage uses Aristotle's ability to generate specifications from
-code definitions and prove them in a single pass.
-"""
+"""Stage 2: Proving - Submit Lean definitions to Aristotle for spec generation + proofs."""
 from __future__ import annotations
-import os
-import asyncio
+import os, asyncio
 from pathlib import Path
-from typing import Optional
-
-from helpers import log, _read_text_file, _write_text_file, run_lake_build, trunc
+from helpers import log, run_lake_build, SPEC_DIR, SPEC_SRC_DIR, MODEL_ID
+from stages.llm import generate_content_with_retry
 
 try:
     import aristotlelib
-    from aristotlelib import ProjectInputType
+    from aristotlelib import ProjectInputType, ProjectStatus
 except ImportError:
     aristotlelib = None
     ProjectInputType = None
+    ProjectStatus = None
 
+def _generate_project_description(ctx: dict, main_content: str) -> str:
+    """Ask Gemini to describe the project for Aristotle."""
+    prompt = ctx.get("prompt", "")
+    user_msg = f"""Write a project description that will be sent to Aristotle, an automated theorem prover for Lean 4.
 
-def run_stage_proving(ctx: dict) -> None:
-    """
-    Run the Proving stage - submit Lean definitions to Aristotle for
-    spec generation and proof completion.
-    
-    Uses Aristotle's INFORMAL mode with formal_input_context to:
-    1. Pass the implementation (definitions) as context
-    2. Request formal specifications
-    3. Have Aristotle prove them
-    """
-    log("=== Stage 2: Specification + Proving via Aristotle ===")
-    ctx["current_stage"] = "PROVING"
+Original specification:
+{prompt}
 
-    if aristotlelib is None:
-        log("WARNING: aristotlelib not installed. Skipping Aristotle proving.")
-        log("To install: pip install aristotlelib")
-        _create_placeholder_verif(ctx)
-        return
-
-    # Check for API key
-    api_key = ctx["secrets"]["secrets"].get("ARISTOTLE_API_KEY", "")
-    if not api_key:
-        api_key = os.environ.get("ARISTOTLE_API_KEY", "")
-    
-    if not api_key:
-        log("WARNING: ARISTOTLE_API_KEY not set. Skipping Aristotle proving.")
-        log("Add ARISTOTLE_API_KEY to secrets.toml or environment.")
-        _create_placeholder_verif(ctx)
-        return
-
-    os.environ["ARISTOTLE_API_KEY"] = api_key
-
-    # Collect all implementation files as context
-    impl_files = []
-    for rel in sorted(ctx["allowed_lean_writes"]):
-        if rel.startswith(f"{ctx['name']}/") and not rel.endswith("Verif.lean"):
-            p = ctx["spec_src_root"] / rel
-            if p.exists():
-                impl_files.append(p)
-
-    if not impl_files:
-        log("No implementation files found. Cannot generate specs.")
-        _create_placeholder_verif(ctx)
-        return
-
-    # Build the prompt for Aristotle
-    prompt = _build_aristotle_prompt(ctx, impl_files)
-
-    try:
-        cwd = os.getcwd()
-        os.chdir(ctx["spec_pkg_root"])
-
-        log(f"Submitting {len(impl_files)} implementation files to Aristotle...")
-        log(f"Prompt: {trunc(prompt, 500)}")
-
-        # Use asyncio to run the async API
-        result = asyncio.run(_submit_to_aristotle(ctx, impl_files, prompt))
-
-        os.chdir(cwd)
-
-        if result:
-            # result is the proven content from Aristotle
-            verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
-            _write_text_file(verif_path, result)
-            log(f"Wrote proven specifications to {verif_path}")
-
-            # Verify it builds
-            bres = run_lake_build(ctx["spec_pkg_root"])
-            if not bres.startswith("Build Success"):
-                log(f"WARNING: Verif.lean from Aristotle does not build: {bres}")
-                # Try to repair or fall back
-                _repair_verif_or_fallback(ctx, result, bres)
-            else:
-                log("Aristotle verification complete - specs proven!")
-        elif result is None:
-            # Async mode - Aristotle job submitted but not waiting for result
-            # Job ID was already logged. Just create placeholder and continue.
-            log("Aristotle job submitted (async). Creating placeholder Verif.lean.")
-            log("Check Aristotle dashboard for job status and retrieve result when complete.")
-            _create_placeholder_verif(ctx)
-        else:
-            log("Aristotle returned no result. Creating placeholder Verif.lean.")
-            _create_placeholder_verif(ctx)
-
-    except Exception as e:
-        log(f"Aristotle error: {e}")
-        try:
-            os.chdir(cwd)
-        except Exception:
-            pass
-        _create_placeholder_verif(ctx)
-
-    # Generate safety case
-    _generate_safety_case(ctx)
-
-    log("=== Stage 2 Complete: Specification + Proving ===")
-
-
-async def _submit_to_aristotle(
-    ctx: dict,
-    impl_files: list,
-    prompt: str
-) -> Optional[str]:
-    """Submit to Aristotle for theorem proving.
-    
-    Aristotle can take days to complete proofs, so we:
-    1. Create a Verif.lean that imports Main.lean (so Aristotle sees existing defs)
-    2. Create a description file telling Aristotle to ADD theorems (not redefine)
-    3. Don't wait for completion - just submit and return job ID
-    """
-    try:
-        verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
-        main_rel = f"Spec.{ctx['name']}.Main"
-        
-        # Create Verif.lean that imports Main.lean - Aristotle will ADD theorems here
-        # The import makes all definitions from Main.lean visible
-        stub_content = f"""import Spec.Prelude
-import {main_rel}
-
-namespace Spec.{ctx['name']}
-
-/-!
-# Formal Specifications
-
-This file contains formal specifications (theorems) about the definitions in Main.lean.
-
-## IMPORTANT FOR ARISTOTLE:
-- All types and functions are ALREADY DEFINED in Main.lean
-- Do NOT redefine Stack, StackRes, StackPopRes, etc.
-- Only ADD theorems that prove properties about the existing definitions
-- Reference definitions using their full names, e.g., `Spec.{ctx['name']}.Stack`
--/
-
--- Placeholder theorem (Aristotle will replace with real proofs)
-#check @Nat.add
-
-end Spec.{ctx['name']}
-"""
-        _write_text_file(verif_path, stub_content)
-        
-        # CRITICAL: Verify the project builds before submission
-        log("Building project before Aristotle submission...")
-        build_result = run_lake_build(ctx["spec_pkg_root"])
-        if not build_result.startswith("Build Success"):
-            log(f"Project fails to build with Verif.lean: {build_result}")
-            return None
-        log("Project builds successfully - submitting to Aristotle...")
-        
-        # Read Main.lean content to include in description
-        main_lean_path = impl_files[0] if impl_files else None
-        main_content = ""
-        if main_lean_path and main_lean_path.exists():
-            main_content = _read_text_file(main_lean_path)
-        
-        # Create a description file for Aristotle (this is the INPUT)
-        # Explicitly tell Aristotle to use existing definitions
-        desc_path = ctx["spec_pkg_root"] / f"aristotle_request_{ctx['name']}.txt"
-        description = f"""Generate formal specifications (theorems with proofs) for the Lean code in {main_rel}.
-
-CRITICAL INSTRUCTIONS:
-1. DO NOT redefine any types or functions - they are already defined in Main.lean
-2. IMPORT Main.lean using: import {main_rel}
-3. Only ADD theorems that prove properties about the EXISTING definitions
-4. Write your output to Spec/{ctx['name']}/Verif.lean
-
-The definitions you should prove properties about are in Main.lean:
-
+Implementation:
 ```lean
 {main_content}
 ```
 
-REQUIRED THEOREMS:
-1. Structural invariants (e.g., data structure validity conditions)
-2. Functional correctness (operations have expected effects)
-3. Edge case handling (empty inputs, bounds, overflow)
-4. Push/pop or similar operation inverses where applicable
+Describe (2-3 paragraphs):
+1. What the program does (high-level purpose)
+2. Key functions/definitions and their expected behavior
+3. Important properties that should hold (invariants, totality, correctness conditions)
 
-OUTPUT FORMAT:
-- Start with: import Spec.Prelude
-- Then: import {main_rel}
-- Open namespace: namespace Spec.{ctx['name']}
-- Add theorems referencing existing types like `Stack`, `stackPush`, etc.
-- All proofs must be complete (no sorry)
+Be specific about function names. Write *to* Aristotle, not *about* Aristotle."""
 
-Remember: DO NOT redefine Stack, StackRes, etc. They already exist in Main.lean.
-"""
-        _write_text_file(desc_path, description)
-        
-        # Submit to Aristotle - use Verif.lean as formal_input_context
-        # This tells Aristotle where to write the output
-        verif_rel = str(verif_path.relative_to(ctx["spec_pkg_root"]))
-        
-        log(f"Submitting to Aristotle (INFORMAL mode)...")
-        log(f"Input: {desc_path.name}")
-        log(f"Formal context (output file): {verif_rel}")
-        log("NOTE: Aristotle proofs can take hours to days. Not waiting for completion.")
-        
-        result = await aristotlelib.Project.prove_from_file(
-            input_file_path=str(desc_path.relative_to(ctx["spec_pkg_root"])),
-            project_input_type=ProjectInputType.INFORMAL,
-            formal_input_context=verif_rel,  # Aristotle writes theorems here
-            auto_add_imports=True,
-            validate_lean_project=True,
-            wait_for_completion=False,
-        )
-        
-        if result:
-            log(f"Aristotle job submitted. Project ID: {result}")
-            # Return None to indicate async mode - caller should not treat job ID as content
-            return None
-        
-        return None
-
+    try:
+        resp = generate_content_with_retry(ctx["client"], MODEL_ID, user_msg)
+        if resp.candidates and resp.candidates[0].content.parts:
+            return resp.candidates[0].content.parts[0].text
     except Exception as e:
-        log(f"Aristotle submission error: {e}")
-        return None
+        log(f"Failed to generate description: {e}")
+    return f"Verify the correctness of this Lean 4 implementation based on: {prompt}"
 
+def run_stage_proving(ctx: dict) -> None:
+    log("=== Stage 2: Proving via Aristotle ===")
 
+    if aristotlelib is None:
+        log("WARNING: aristotlelib not installed, creating placeholder Verif.lean")
+        _create_placeholder_verif()
+        return
 
-def _build_aristotle_prompt(ctx: dict, impl_files: list) -> str:
-    """Build the natural language prompt for Aristotle."""
-    file_list = "\n".join([f"- {f.name}" for f in impl_files])
+    api_key = ctx["secrets"]["secrets"].get("ARISTOTLE_API_KEY", "") or os.environ.get("ARISTOTLE_API_KEY", "")
+    if not api_key:
+        log("WARNING: ARISTOTLE_API_KEY not set, creating placeholder Verif.lean")
+        _create_placeholder_verif()
+        return
+
+    os.environ["ARISTOTLE_API_KEY"] = api_key
+
+    # Find implementation files (Main.lean and any Module*.lean)
+    impl_files = [f for f in SPEC_SRC_DIR.glob("*.lean") 
+                  if f.name not in {"Prelude.lean", "Verif.lean"}]
     
-    return f"""Analyze the provided Lean implementation files and generate formal specifications with proofs.
+    if not impl_files:
+        log("No implementation files found")
+        _create_placeholder_verif()
+        return
 
-IMPLEMENTATION FILES:
-{file_list}
+    try:
+        cwd = os.getcwd()
+        os.chdir(SPEC_DIR)
+        submission_result = asyncio.run(_submit_to_aristotle(ctx, impl_files))
+        os.chdir(cwd)
+    except Exception as e:
+        log(f"Aristotle error: {e}")
+        _create_placeholder_verif()
 
-REQUIREMENTS:
-1. Generate formal specifications (theorems/lemmas) for each major function
-2. Include invariants for:
-   - Memory safety (array bounds, pool exhaustion)
-   - Functional correctness (operations have expected effects)
-   - Structural invariants (tree properties, list properties)
-3. Prove all theorems (no sorry allowed)
-4. All specs must reference the actual definitions from the implementation files
+    try:
+        from stages.report import generate_report
+        generate_report(ctx)
+    except Exception:
+        pass
 
-OUTPUT FORMAT:
-- Create a single Verif.lean file
-- Import Spec.Prelude and Spec.{ctx['name']}
-- Use namespace Spec.{ctx['name']}
-- Include at least 10 meaningful theorems
-- All theorems must be fully proven
+    log("=== Stage 2 Complete ===")
+    return submission_result if 'submission_result' in locals() else None
 
-Begin generating specifications and proofs for the {ctx['name']} implementation.
-"""
-
-
-def _create_placeholder_verif(ctx: dict) -> None:
-    """Create a placeholder Verif.lean when Aristotle is unavailable."""
-    verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
+async def _submit_to_aristotle(ctx: dict, impl_files: list) -> None:
+    verif_path = SPEC_SRC_DIR / "Verif.lean"
     
-    # Import Main directly to avoid circular dependency with generated.lean
-    content = f"""import Spec.Prelude
-import Spec.{ctx['name']}.Main
-
-namespace Spec.{ctx['name']}
-
-/-
-  PLACEHOLDER SPECIFICATIONS
-  
-  Aristotle was not available to generate and prove specifications.
-  The implementation has been verified via differential testing.
-  
-  To complete formal verification:
-  1. Set ARISTOTLE_API_KEY in secrets.toml
-  2. Re-run the pipeline
-  
-  Or manually add specifications below.
--/
-
--- TODO: Add formal specifications here
-
-end Spec.{ctx['name']}
-"""
-    _write_text_file(verif_path, content)
-    log(f"Created placeholder Verif.lean at {verif_path}")
-
-
-def _repair_verif_or_fallback(ctx: dict, content: str, build_error: str) -> None:
-    """Attempt to repair Verif.lean or fall back to placeholder."""
-    log("Attempting to repair Verif.lean...")
+    # 1. Read Verif.lean and add imports for any extra implementation files
+    verif_content = verif_path.read_text()
     
-    # For now, just fall back to placeholder
-    # Future: could use LLM to repair based on build errors
-    _create_placeholder_verif(ctx)
-
-
-def _generate_safety_case(ctx: dict) -> None:
-    """Generate a safety case document summarizing the verification."""
-    safety_case_path = Path(ctx["safety_case_rel"])
+    # Add imports for any Module*.lean files not already imported
+    extra_imports = []
+    for f in impl_files:
+        module_name = f.stem
+        import_line = f"import Src.{module_name}"
+        if import_line not in verif_content:
+            extra_imports.append(import_line)
     
-    # Get equivalence test report
-    equiv_report = ctx["equiv_state"].get("last_report", {})
-    passed_runs = equiv_report.get("passed_runs", 0) if isinstance(equiv_report, dict) else 0
-    total_time = equiv_report.get("total_time_s", 0) if isinstance(equiv_report, dict) else 0
+    if extra_imports:
+        # Insert extra imports after the existing import lines
+        lines = verif_content.split("\n")
+        insert_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith("import "):
+                insert_idx = i + 1
+        for imp in reversed(extra_imports):
+            lines.insert(insert_idx, imp)
+        verif_content = "\n".join(lines)
+        verif_path.write_text(verif_content)
+    
+    if not run_lake_build(SPEC_DIR).startswith("Build Success"):
+        return
 
-    verif_path = ctx["spec_src_root"] / f"{ctx['name']}/Verif.lean"
-    has_proofs = verif_path.exists() and "sorry" not in _read_text_file(verif_path)
-
-    content = f"""# Safety Case: {ctx['name']}
-
-## Executive Summary
-
-This document presents the safety case for the `{ctx['name']}` implementation,
-demonstrating its correctness through a combination of differential testing
-and formal verification.
-
-## Verification Approach
-
-### Stage 1: Co-Generation with Differential Testing
-
-The C implementation and Lean translation were developed simultaneously
-with integrated differential testing to ensure semantic equivalence.
-
-**Test Results:**
-- Passed Runs: {passed_runs}/{DIFF_REQUIRED_RUNS}
-- Minimum Cases per Run: {DIFF_MIN_CASES_PER_RUN}
-- Total Test Time: {total_time:.2f}s
-
-### Stage 2: Formal Specification and Proof
-
-{"The Lean implementation has been formally specified and proven via Aristotle." if has_proofs else "Formal proofs pending - Aristotle configuration required."}
-
-## Evidence Summary
-
-| Criterion | Status |
-|-----------|--------|
-| Differential Tests | {"✓ PASSED" if passed_runs >= DIFF_REQUIRED_RUNS else "⚠ INCOMPLETE"} |
-| Lake Build | ✓ PASSED |
-| Formal Proofs | {"✓ COMPLETE" if has_proofs else "⚠ PENDING"} |
-
-## Conclusion
-
-{"The implementation has been verified through both empirical testing and formal proofs." if has_proofs else "The implementation has been verified through differential testing. Formal proofs are pending Aristotle configuration."}
+    # 2. Construct the Prompt to Aristotle
+    # Generate a detailed description using Gemini, then ask Aristotle to prove theorems.
+    all_content = "\n\n".join(f"-- {f.name}\n{f.read_text()}" for f in impl_files)
+    description = _generate_project_description(ctx, all_content)
+    
+    desc_path = SPEC_DIR / "aristotle_request.txt"
+    aristotle_prompt = f"""{description}
 
 ---
-*Generated by Anneal Universal Verification Agent*
-"""
-    _write_text_file(safety_case_path, content)
-    log(f"Generated safety case at {safety_case_path}")
 
+Write a complete Verif.lean file that verifies the correctness of this implementation.
+Your output must be a valid Lean 4 file based on:
 
-# Import at module level for safety case generation
-from helpers import DIFF_REQUIRED_RUNS, DIFF_MIN_CASES_PER_RUN
+```lean
+{verif_content}```
+
+Replace the empty namespace body with actual theorems and proofs.
+Focus on:
+- Functional correctness of the main operations
+- Totality (functions terminate on all valid inputs)  
+- Key invariants and properties
+
+The implementation code is:
+
+```lean
+{all_content}
+```"""
+    desc_path.write_text(aristotle_prompt)
+    
+    verif_rel = str(verif_path.relative_to(SPEC_DIR))
+    # 3. Call Aristotle API
+    # We send two key inputs:
+    #   - input_file_path: The request text (prompt + code)
+    #   - formal_input_context: The context file (Verif.lean) to verify against
+    result = await aristotlelib.Project.prove_from_file(
+        input_file_path=str(desc_path.relative_to(SPEC_DIR)),
+        project_input_type=ProjectInputType.INFORMAL,
+        formal_input_context=verif_rel,
+        auto_add_imports=True,
+        validate_lean_project=True, # Validates that the generated proofs actually compile
+        wait_for_completion=False,
+    )
+    if result:
+        log(f"Aristotle job submitted: {result}")
+    return result
+
+def _create_placeholder_verif() -> None:
+    path = SPEC_SRC_DIR / "Verif.lean"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("""import Src.Prelude
+import Src.Main
+
+namespace Src
+-- Placeholder: Aristotle not available
+end Src
+""")
+
+async def download_aristotle_solution(aristotle_id: str, output_path: Path | str) -> tuple[str, str | None]:
+    if aristotlelib is None:
+        return "MISSING_LIB", None
+
+    project = await aristotlelib.Project.from_id(aristotle_id)
+    await project.refresh()
+    status = project.status
+
+    if ProjectStatus is not None and status != ProjectStatus.COMPLETE:
+        return str(status), None
+    if ProjectStatus is None and str(status) != "COMPLETE":
+        return str(status), None
+
+    solution_path = await project.get_solution(output_path=str(output_path))
+    return str(status), str(solution_path)

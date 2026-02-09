@@ -1,4 +1,5 @@
 **/.git
+!.git
 **/.lake
 **/target
 **/__pycache__
@@ -9,3 +10,9 @@
 **/*.o
 **/*.a
 **/*.so
+**/.venv
+**/venv
+secrets.toml
+template/
+deploy/
+rebuild.bat
