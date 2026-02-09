@@ -4,17 +4,14 @@
 
 ## Overview
 
-Anneal is a system for generating formally verified C code from natural language specifications. It orchestrates a pipeline that combines Large Language Models (LLMs) for code generation with automated theorem provers for formal verification.
-
-The system guarantees that the generated C implementation adheres to a chemically-generated formal specification (in Lean 4) through a multi-stage process of co-generation, differential testing, and automated proving.
+Anneal is the backend Invariant calls into when a user requests "Verified Code." Based on Gemini 3, it generates C and Lean code together, differential tests them to establish that the C code is equivalent to the Lean, then submits the Lean to Harmonic's Aristotle for proving.
 
 ## Architecture
 
-The system consists of three main components:
+The system consists of two main components:
 
 1.  **Trigger API**: A Flask-based REST API that manages job submissions, polls for proof completion, and serves generated artifacts.
 2.  **Anneal Worker**: A stateless worker (deployed as a Google Cloud Run Job) that executes the generation and verification pipeline.
-3.  **Aristotle**: An external automated theorem proving service for Lean 4.
 
 ### Pipeline Stages
 
@@ -23,12 +20,12 @@ The `main.py` entry point orchestrates the following stages:
 #### Stage 1: Co-Generation (`stages/cogeneration.py`)
 *   **Input**: Natural language prompt.
 *   **Process**:
-    *   An LLM (Gemini) generates a C implementation and a corresponding Lean 4 specification side-by-side.
+    *   Gemini generates a C implementation and a corresponding Lean 4 specification side-by-side.
     *   It generates a "Differential Test Suite" (C inputs and expected outputs).
-    *   The system compiles the C code and the Lean specification.
+    *   It compiles the C code and the Lean specification.
     *   It executes the C code and the Lean model on the test suite to ensure functional equivalence (Differential Testing).
-    *   This loop repeats (up to a fixed number of turns) until the build passes, tests pass, and the LLM submits the stage.
-*   **Output**: Valid C source (`generated/*.c`) and Lean specification (`spec/Src/Main.lean`).
+    *   This loop repeats (up to a fixed number of turns) until the build passes, tests pass and Gemini submits to Stage 2.
+*   **Output**: Valid C source (`generated/*.c`) and Lean specification (`spec/Src`).
 
 #### Stage 2: Proving (`stages/proving.py`)
 *   **Input**: Lean specification and implementation from Stage 1.
@@ -37,8 +34,6 @@ The `main.py` entry point orchestrates the following stages:
     *   It submits the `Verif.lean` file and dependencies to the Aristotle API.
     *   The job enters a "polling" state while Aristotle attempts to prove the theorems (functional correctness, safety, termination).
 *   **Output**: A proof request ID (`aristotle_id`).
-
-
 
 ## Codebase Structure
 
