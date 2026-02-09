@@ -1,5 +1,7 @@
 flask>=3.0.0
+flask-cors>=4.0.0
 gunicorn>=21.0.0
 google-cloud-run>=0.10.0
 google-cloud-storage>=2.10.0
 google-auth>=2.0.0
+aristotlelib>=0.7.0

@@ -26,6 +26,22 @@ def get_gemini_tools() -> types.Tool:
 def tool_output_item(call_id: str, out: str, name: str = "unknown") -> Dict[str, Any]:
     return {"call_id": call_id, "output": out, "name": name, "type": "function_call_output"}
 
+def generate_content_with_retry(client, model, contents, config=None):
+    """
+    Wrapper for generate_content with robust rate limit handling.
+    Catches errors 5 times (6 attempts total), sleeping 60s on each fail.
+    """
+    for attempt in range(6):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as e:
+            if attempt < 5:
+                # Silent sleep as requested
+                log(f"API Error (attempt {attempt+1}/6): {e}. Sleeping 60s...") 
+                time.sleep(60)
+            else:
+                raise e
+
 def responses_create(ctx: dict, *, instructions: str, input_data: Any, **_):
     """
     Wrapper for Gemini API call.
@@ -39,9 +55,8 @@ def responses_create(ctx: dict, *, instructions: str, input_data: Any, **_):
         tools=[get_gemini_tools()],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
-    # Note: Retries are handled by the 'tenacity' library upstream if configured,
-    # or by the built-in client depending on version.
-    return ctx["client"].models.generate_content(model=MODEL_ID, contents=contents, config=config)
+    # Use the retry wrapper
+    return generate_content_with_retry(ctx["client"], MODEL_ID, contents, config)
 
 def update_test_state_from_report(ctx: dict, report_json: str) -> None:
     try:

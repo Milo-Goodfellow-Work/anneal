@@ -1,14 +1,17 @@
 """Stage 2: Proving - Submit Lean definitions to Aristotle for spec generation + proofs."""
 from __future__ import annotations
 import os, asyncio
+from pathlib import Path
 from helpers import log, run_lake_build, SPEC_DIR, SPEC_SRC_DIR, MODEL_ID
+from stages.llm import generate_content_with_retry
 
 try:
     import aristotlelib
-    from aristotlelib import ProjectInputType
+    from aristotlelib import ProjectInputType, ProjectStatus
 except ImportError:
     aristotlelib = None
     ProjectInputType = None
+    ProjectStatus = None
 
 def _generate_project_description(ctx: dict, main_content: str) -> str:
     """Ask Gemini to describe the project for Aristotle."""
@@ -31,7 +34,7 @@ Describe (2-3 paragraphs):
 Be specific about function names. Write *to* Aristotle, not *about* Aristotle."""
 
     try:
-        resp = ctx["client"].models.generate_content(model=MODEL_ID, contents=user_msg)
+        resp = generate_content_with_retry(ctx["client"], MODEL_ID, user_msg)
         if resp.candidates and resp.candidates[0].content.parts:
             return resp.candidates[0].content.parts[0].text
     except Exception as e:
@@ -166,3 +169,19 @@ namespace Src
 -- Placeholder: Aristotle not available
 end Src
 """)
+
+async def download_aristotle_solution(aristotle_id: str, output_path: Path | str) -> tuple[str, str | None]:
+    if aristotlelib is None:
+        return "MISSING_LIB", None
+
+    project = await aristotlelib.Project.from_id(aristotle_id)
+    await project.refresh()
+    status = project.status
+
+    if ProjectStatus is not None and status != ProjectStatus.COMPLETE:
+        return str(status), None
+    if ProjectStatus is None and str(status) != "COMPLETE":
+        return str(status), None
+
+    solution_path = await project.get_solution(output_path=str(output_path))
+    return str(status), str(solution_path)

@@ -71,3 +71,25 @@ docker build -t anneal-dev .
 docker stop anneal-work && docker rm anneal-work
 docker run -d --name anneal-work anneal-dev
 ```
+
+## Trigger API + Job Modes
+
+The trigger API (see [trigger_api/main.py](trigger_api/main.py)) supports both submitting jobs and polling Aristotle status.
+
+### Endpoints
+
+- Submit new job: `POST /submit` with JSON `{ "prompt": "..." }`
+- Job status: `GET /status/<job_id>`
+	- Add `?include_aristotle=true` to refresh `aristotle_status`
+- Aristotle-only status: `GET /aristotle/<job_id>`
+- List latest files: `GET /files/<job_id>`
+- Poll and trigger verification: `POST /poll` (intended for Cloud Scheduler every 15 minutes)
+
+### Job container mode
+
+The Cloud Run Job container supports a mode switch via env var:
+
+- `JOB_MODE=prove` (default): runs cogeneration + submits to Aristotle
+- `JOB_MODE=verify`: downloads Aristotle solution to spec/Src/Verif.lean and runs `lake build`
+
+The trigger API uses `JOB_MODE=prove` for `/submit` and `JOB_MODE=verify` when Aristotle status is `COMPLETE` during `/poll`.

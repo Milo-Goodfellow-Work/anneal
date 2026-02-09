@@ -25,9 +25,9 @@ def update_job_status(job_id: str, bucket: str, status: str, error: Optional[str
     params = json.loads(blob.download_as_text())
     params["status"] = status
     params["updated_at"] = datetime.now().isoformat()
-    if status == "running":
+    if status == "running" or status == "verifying":
         params["started_at"] = datetime.now().isoformat()
-    elif status in ("completed", "failed"):
+    elif status in ("completed", "failed", "verification_failed"):
         params["finished_at"] = datetime.now().isoformat()
         if error: params["error"] = error
     params.update(kwargs)
@@ -44,7 +44,7 @@ def _collect_files() -> list[Path]:
         files.extend(f for f in reports.glob("*") if f.is_file())
     return files
 
-def upload_results(job_id: str, bucket: str, success: bool) -> dict:
+def upload_results(job_id: str, bucket: str, success: bool, proof_verified: bool = False) -> dict:
     """Upload results to GCS."""
     from google.cloud import storage
     project_id = os.environ.get("PROJECT_ID")
@@ -67,6 +67,7 @@ def upload_results(job_id: str, bucket: str, success: bool) -> dict:
     status = {
         "job_id": job_id,
         "status": "completed" if success else "failed",
+        "proof_verified": proof_verified,
         "latest_run_id": run_id,
         "files_uploaded": len(files),
         "completed_at": datetime.now().isoformat(),
@@ -93,9 +94,35 @@ def call_webhook(url: str, job_id: str, status: dict, bucket: Optional[str] = No
     except urllib.error.URLError:
         pass
 
-def finalize_gcp_job(job_id: str, success: bool, bucket: Optional[str] = None, callback_url: Optional[str] = None):
-    if not bucket: return
-    status = upload_results(job_id, bucket, success)
+def finalize_gcp_job(job_id: str, success: bool, bucket: Optional[str] = None, callback_url: Optional[str] = None, proof_verified: bool = False):
+    if not bucket: return None
+    status = upload_results(job_id, bucket, success, proof_verified=proof_verified)
     if callback_url:
         call_webhook(callback_url, job_id, status, bucket)
+    return status
+
+def download_job_files(job_id: str, bucket: str) -> int:
+    """Download latest job files from GCS to local workspace."""
+    from google.cloud import storage
+    project_id = os.environ.get("PROJECT_ID")
+    storage_client = storage.Client(project=project_id)
+    bkt = storage_client.bucket(bucket)
+    
+    prefix = f"{job_id}/latest/"
+    blobs = storage_client.list_blobs(bkt, prefix=prefix)
+    
+    downloaded = 0
+    for blob in blobs:
+        if blob.name.endswith("/"):
+            continue
+        
+        # Remove prefix to get local path
+        local_path = Path(blob.name.replace(f"{job_id}/latest/", ""))
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        blob.download_to_filename(str(local_path))
+        downloaded += 1
+    
+    log(f"Downloaded {downloaded} files from gs://{bucket}/{job_id}/latest/")
+    return downloaded
     return status
