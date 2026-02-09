@@ -83,3 +83,5 @@ Deployment is managed via standard Docker workflows.
 *   `POST /submit`: Submit a new job (`{"prompt": "..."}`).
 *   `GET /status/<job_id>`: Check job progress.
 *   `GET /files/<job_id>/download`: Download all artifacts (C code, Lean spec, Proofs) as a ZIP.
+
+In addition to this README, further documentation inline in Python files.
