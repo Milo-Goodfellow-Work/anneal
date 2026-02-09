@@ -1,95 +1,90 @@
-# Anneal - Universal Verification Agent
+# Invariant - Verified Code Generation (Anneal)
 
-Generate verified C code from natural language prompts using Lean 4 formal verification.
+![Architecture Diagram](Diagram.png)
 
-## Quick Start
+## Overview
 
-### Build and Run Container
+Anneal is a system for generating formally verified C code from natural language specifications. It orchestrates a pipeline that combines Large Language Models (LLMs) for code generation with automated theorem provers for formal verification.
 
-```bash
-# Build the image (includes Lean + pre-built Mathlib cache)
-docker build -t anneal-dev .
+The system guarantees that the generated C implementation adheres to a chemically-generated formal specification (in Lean 4) through a multi-stage process of co-generation, differential testing, and automated proving.
 
-# Run long-lived container
-docker run -d --name anneal-work anneal-dev
+## Architecture
 
-# Attach VS Code
-# 1. Install Docker extension in VS Code
-# 2. Right-click 'anneal-work' container → "Attach Visual Studio Code"
-# 3. Open folder: /app
-```
+The system consists of three main components:
 
-### Run Generation
+1.  **Trigger API**: A Flask-based REST API that manages job submissions, polls for proof completion, and serves generated artifacts.
+2.  **Anneal Worker**: A stateless worker (deployed as a Google Cloud Run Job) that executes the generation and verification pipeline.
+3.  **Aristotle**: An external automated theorem proving service for Lean 4.
 
-Inside the container:
-```bash
-python main.py --prompt "Create a memory arena"
-```
+### Pipeline Stages
 
-### Reset Between Runs
+The `main.py` entry point orchestrates the following stages:
 
-**The critical step:** Before each new generation, reset the workspace to a clean state:
+#### Stage 1: Co-Generation (`stages/cogeneration.py`)
+*   **Input**: Natural language prompt.
+*   **Process**:
+    *   An LLM (Gemini) generates a C implementation and a corresponding Lean 4 specification side-by-side.
+    *   It generates a "Differential Test Suite" (C inputs and expected outputs).
+    *   The system compiles the C code and the Lean specification.
+    *   It executes the C code and the Lean model on the test suite to ensure functional equivalence (Differential Testing).
+    *   This loop repeats (up to a fixed number of turns) until the build passes, tests pass, and the LLM submits the stage.
+*   **Output**: Valid C source (`generated/*.c`) and Lean specification (`spec/Src/Main.lean`).
 
-```bash
-# Restore spec/ to clean state and remove all generated files
-git checkout spec/
-git clean -fdx generated/
+#### Stage 2: Proving (`stages/proving.py`)
+*   **Input**: Lean specification and implementation from Stage 1.
+*   **Process**:
+    *   The system generates a project description for the Aristotle prover.
+    *   It submits the `Verif.lean` file and dependencies to the Aristotle API.
+    *   The job enters a "polling" state while Aristotle attempts to prove the theorems (functional correctness, safety, termination).
+*   **Output**: A proof request ID (`aristotle_id`).
 
-# Now run your next generation
-python main.py --prompt "Create a hash table"
-```
 
-**Why this is needed:** 
-- Anneal modifies `spec/` during code generation (adds Lean modules)
-- `git checkout spec/` restores `spec/` to its clean template state from git
-- `git clean -fdx generated/` removes all untracked files in `generated/`
-- `spec/` and `generated/` are **intentionally tracked** in git so you can reset them
 
-## Git Workflow
+## Codebase Structure
 
-You can commit from inside the container:
-```bash
-git config --global user.email "you@example.com"
-git config --global user.name "Your Name"
+*   **`anneal/`**: Root directory.
+    *   **`main.py`**: Entry point for the worker. Handles argument parsing, GCP context, and stage orchestration.
+    *   **`trigger_api/`**: The REST API application (`main.py`, `Dockerfile`).
+    *   **`stages/`**: Logic for each pipeline stage.
+        *   `cogeneration.py`: LLM interaction loop.
+        *   `diff_test.py`: Differential testing logic (C vs Lean).
+        *   `proving.py`: Aristotle integration.
+        *   `llm.py`: Shared LLM utilities with rate-limiting and tool execution.
+    *   **`spec/`**: The Lean 4 project template.
+        *   `Src/`: Source for generated Lean files.
+        *   `lakefile.toml`: Lean build configuration (includes `maxHeartbeats` settings).
+    *   **`generated/`**: Sandbox for generated C files.
 
-# Make changes to source code
-git add stages/ main.py helpers.py
-git commit -m "Added feature"
-git push
-```
+## Usage
 
-**Notes:** 
-- `spec/` and `generated/` are tracked in git, so after running generation you'll see them as modified
-- **Don't commit** modifications to `spec/` or `generated/` - reset them instead (see above)
-- Only commit changes to source code (Python files, Dockerfiles, etc.)
+### Local Development
 
-## Rebuilding
+1.  **Build**:
+    ```bash
+    # Requires Lean 4 and Lake installed
+    lake build
+    ```
 
-After pushing code changes, rebuild the image to get the latest:
-```bash
-docker build -t anneal-dev .
-docker stop anneal-work && docker rm anneal-work
-docker run -d --name anneal-work anneal-dev
-```
+2.  **Run Generation**:
+    ```bash
+    python main.py --prompt "Implement a double-linked list with O(1) append"
+    ```
 
-## Trigger API + Job Modes
+### Cloud Deployment
 
-The trigger API (see [trigger_api/main.py](trigger_api/main.py)) supports both submitting jobs and polling Aristotle status.
+The system is deployed on Google Cloud Platform:
+*   **GCP Cloud Run Job**: `anneal-job` (Worker)
+*   **GCP Cloud Run Service**: `anneal-api` (Trigger API)
+*   **GCP Cloud Scheduler**: Triggers `/poll` every 15 minutes.
 
-### Endpoints
+**Deployment**:
+Deployment is managed via standard Docker workflows.
+1.  Build the job image (`Dockerfile` in root).
+2.  Build the API image (`trigger_api/Dockerfile`).
+3.  Deploy efficiently to Google Cloud Run.
 
-- Submit new job: `POST /submit` with JSON `{ "prompt": "..." }`
-- Job status: `GET /status/<job_id>`
-	- Add `?include_aristotle=true` to refresh `aristotle_status`
-- Aristotle-only status: `GET /aristotle/<job_id>`
-- List latest files: `GET /files/<job_id>`
-- Poll and trigger verification: `POST /poll` (intended for Cloud Scheduler every 15 minutes)
+## API Endpoints
 
-### Job container mode
-
-The Cloud Run Job container supports a mode switch via env var:
-
-- `JOB_MODE=prove` (default): runs cogeneration + submits to Aristotle
-- `JOB_MODE=verify`: downloads Aristotle solution to spec/Src/Verif.lean and runs `lake build`
-
-The trigger API uses `JOB_MODE=prove` for `/submit` and `JOB_MODE=verify` when Aristotle status is `COMPLETE` during `/poll`.
+*   `POST /submit`: Submit a new job (`{"prompt": "..."}`).
+*   `GET /status/<job_id>`: Check job progress.
+*   `GET /files/<job_id>/download`: Download all artifacts (C code, Lean spec, Proofs) as a ZIP.
